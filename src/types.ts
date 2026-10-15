@@ -43,6 +43,7 @@ export interface UnitEntity {
   maxTiberiumLoad: number;
   stateTimer: number;
   targetRefineryId: number | null;
+  stuckTicks?: number;
 }
 
 export interface BuildingEntity {

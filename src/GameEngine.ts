@@ -481,7 +481,16 @@ export class GameEngine {
         }
 
         case 'MOVING_TO_TIBERIUM': {
-          if (unit.targetX === null && unit.targetY === null) {
+          const gx = Math.floor(unit.x / TILE_SIZE);
+          const gy = Math.floor(unit.y / TILE_SIZE);
+          const patch = this.tiberiumPatches.find((p) => p.gridX === gx && p.gridY === gy && p.amount > 0);
+          const distToTarget = unit.targetX !== null && unit.targetY !== null
+            ? Math.hypot(unit.targetX - unit.x, unit.targetY - unit.y)
+            : 0;
+
+          if (patch || distToTarget <= Math.max(unit.speed * 1.5, 16) || (unit.targetX === null && unit.targetY === null)) {
+            unit.targetX = null;
+            unit.targetY = null;
             unit.harvesterState = 'HARVESTING';
             unit.stateTimer = 10; // Harvest scoop every 10 ticks (0.5s)
           }
@@ -523,9 +532,18 @@ export class GameEngine {
             break;
           }
 
-          if (unit.targetX === null && unit.targetY === null) {
+          const dock = this.getRefineryDockWorldPos(refinery);
+          const distToDock = Math.hypot(dock.x - unit.x, dock.y - unit.y);
+
+          if (distToDock <= Math.max(unit.speed * 1.5, 14) || (unit.targetX === null && unit.targetY === null)) {
+            unit.x = dock.x;
+            unit.y = dock.y;
+            unit.targetX = null;
+            unit.targetY = null;
+            unit.hullAngle = -Math.PI / 2; // Facing UP into the dock
+            unit.turretAngle = -Math.PI / 2;
             unit.harvesterState = 'UNLOADING';
-            unit.stateTimer = 16; // Unload duration (0.8s)
+            unit.stateTimer = 22; // Unload duration (1.1s)
           }
           break;
         }
@@ -536,6 +554,14 @@ export class GameEngine {
             this.credits += unit.tiberiumLoad;
             this.lastCommandText = `Harvester unloaded +$${unit.tiberiumLoad} credits`;
             unit.tiberiumLoad = 0;
+
+            const refinery = unit.targetRefineryId ? this.buildings.get(unit.targetRefineryId) : null;
+            if (refinery) {
+              const dock = this.getRefineryDockWorldPos(refinery);
+              unit.x = dock.x;
+              unit.y = dock.y + 26; // Back out cleanly into clear ground
+            }
+            unit.targetRefineryId = null;
             unit.harvesterState = 'IDLE';
           }
           break;
@@ -612,7 +638,7 @@ export class GameEngine {
     const { TILE_SIZE } = GAME_CONFIG;
     return {
       x: (refinery.gridX + refinery.widthTiles / 2) * TILE_SIZE,
-      y: (refinery.gridY + refinery.heightTiles) * TILE_SIZE + 18,
+      y: (refinery.gridY + refinery.heightTiles) * TILE_SIZE - 2,
     };
   }
 
@@ -644,7 +670,7 @@ export class GameEngine {
     const unitList = Array.from(this.units.values());
     const { TILE_SIZE } = GAME_CONFIG;
 
-    // 1. Calculate intended movement with obstacle avoidance
+    // 1. Calculate intended movement with Context Ray-Probing Obstacle Avoidance
     for (const unit of unitList) {
       if (unit.targetX === null || unit.targetY === null) continue;
 
@@ -680,98 +706,131 @@ export class GameEngine {
       }
       if (destinationBlocked) continue;
 
-      const dirX = toTargetX / distToTarget;
-      const dirY = toTargetY / distToTarget;
+      const targetAngle = Math.atan2(toTargetY, toTargetX);
+      const probeDist = unit.radius + unit.speed * 5 + 14;
 
-      // Dynamic local avoidance: steer around stationary units and buildings in the forward path
-      let avoidX = 0;
-      let avoidY = 0;
-      const lookAhead = unit.speed * 5 + unit.radius + 10;
+      // Candidate angle offsets relative to target heading
+      const candidateOffsets = [
+        0,
+        0.35, -0.35,
+        0.7, -0.7,
+        1.1, -1.1,
+        1.55, -1.55,
+        2.0, -2.0,
+        2.5, -2.5,
+        Math.PI,
+      ];
 
-      for (const other of unitList) {
-        if (other.id === unit.id) continue;
+      let bestAngle = targetAngle;
+      let bestScore = -Infinity;
 
-        const otherIsStationary = other.targetX === null && other.targetY === null;
-        const dx = other.x - unit.x;
-        const dy = other.y - unit.y;
-        const dist = Math.hypot(dx, dy);
-        const combinedRadius = unit.radius + other.radius + 6;
+      for (const offset of candidateOffsets) {
+        const testAngle = targetAngle + offset;
+        const rx = Math.cos(testAngle);
+        const ry = Math.sin(testAngle);
 
-        if (dist > lookAhead + other.radius || dist < 0.001) continue;
+        // Desirability: prefer angles aligned with the target
+        let score = Math.cos(offset) * 2.0;
+        let maxDanger = 0;
 
-        // Project onto forward movement vector
-        const forwardDist = dx * dirX + dy * dirY;
-        if (forwardDist < -unit.radius * 0.5) continue; // Behind unit
+        // Danger from other units (especially stationary units)
+        for (const other of unitList) {
+          if (other.id === unit.id) continue;
 
-        // Perpendicular distance to the forward ray
-        const perpDist = Math.abs(dx * (-dirY) + dy * dirX);
+          const dx = other.x - unit.x;
+          const dy = other.y - unit.y;
+          const distToOther = Math.hypot(dx, dy);
+          const combinedRadius = unit.radius + other.radius + 4;
 
-        if (perpDist < combinedRadius) {
-          const side = dx * (-dirY) + dy * dirX;
-          let steerSign = side >= 0 ? -1 : 1;
-          if (Math.abs(side) < 0.5) {
-            steerSign = unit.id < other.id ? -1 : 1;
+          if (distToOther > probeDist + other.radius || distToOther < 0.001) continue;
+
+          const proj = dx * rx + dy * ry;
+          if (proj < -unit.radius * 0.4) continue; // Behind test ray
+
+          const perp = Math.abs(dx * (-ry) + dy * rx);
+          if (perp < combinedRadius && proj < probeDist) {
+            const otherIsStationary = other.targetX === null && other.targetY === null;
+            const weight = otherIsStationary ? 2.8 : 1.2;
+            const closeness = 1 - Math.max(0, proj) / probeDist;
+            const lateral = 1 - perp / combinedRadius;
+            const danger = closeness * lateral * weight;
+            if (danger > maxDanger) maxDanger = danger;
+          }
+        }
+
+        // Danger from buildings
+        for (const b of this.buildings.values()) {
+          // If this harvester is docking/unloading at this refinery, do not treat it as an obstacle!
+          if (
+            (unit.harvesterState === 'MOVING_TO_REFINERY' || unit.harvesterState === 'UNLOADING') &&
+            b.id === unit.targetRefineryId
+          ) {
+            continue;
           }
 
-          // Stationary obstacles produce stronger avoidance so moving units route around them
-          const stationaryMult = otherIsStationary ? 2.2 : 1.0;
-          const closeness = 1 - Math.max(0, forwardDist) / (lookAhead + other.radius);
-          const lateral = 1 - perpDist / combinedRadius;
-          const force = closeness * lateral * 1.8 * stationaryMult;
+          const left = b.gridX * TILE_SIZE - unit.radius - 2;
+          const right = (b.gridX + b.widthTiles) * TILE_SIZE + unit.radius + 2;
+          const top = b.gridY * TILE_SIZE - unit.radius - 2;
+          const bottom = (b.gridY + b.heightTiles) * TILE_SIZE + unit.radius + 2;
 
-          avoidX += -dirY * steerSign * force;
-          avoidY += dirX * steerSign * force;
+          for (let step = unit.speed; step <= probeDist; step += unit.speed * 1.5) {
+            const sx = unit.x + rx * step;
+            const sy = unit.y + ry * step;
+            if (sx >= left && sx <= right && sy >= top && sy <= bottom) {
+              const danger = (1 - step / probeDist) * 3.0;
+              if (danger > maxDanger) maxDanger = danger;
+              break;
+            }
+          }
+        }
+
+        // Danger from world edge
+        const testEndX = unit.x + rx * probeDist;
+        const testEndY = unit.y + ry * probeDist;
+        if (
+          testEndX < 24 || testEndX > GAME_CONFIG.MAP_COLS * TILE_SIZE - 24 ||
+          testEndY < 24 || testEndY > GAME_CONFIG.MAP_ROWS * TILE_SIZE - 24
+        ) {
+          maxDanger = Math.max(maxDanger, 2.5);
+        }
+
+        score -= maxDanger * 3.5;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestAngle = testAngle;
         }
       }
 
-      // Avoid solid building footprints
-      for (const b of this.buildings.values()) {
-        const bCenterX = (b.gridX + b.widthTiles / 2) * TILE_SIZE;
-        const bCenterY = (b.gridY + b.heightTiles / 2) * TILE_SIZE;
-        const bRadius = (Math.max(b.widthTiles, b.heightTiles) * TILE_SIZE) / 2;
-
-        const dx = bCenterX - unit.x;
-        const dy = bCenterY - unit.y;
-        const dist = Math.hypot(dx, dy);
-        const combinedRadius = unit.radius + bRadius + 6;
-
-        if (dist > lookAhead + bRadius || dist < 0.001) continue;
-
-        const forwardDist = dx * dirX + dy * dirY;
-        if (forwardDist < -unit.radius) continue;
-
-        const perpDist = Math.abs(dx * (-dirY) + dy * dirX);
-        if (perpDist < combinedRadius) {
-          const side = dx * (-dirY) + dy * dirX;
-          const steerSign = side >= 0 ? -1 : 1;
-          const closeness = 1 - Math.max(0, forwardDist) / (lookAhead + bRadius);
-          const lateral = 1 - perpDist / combinedRadius;
-          const force = closeness * lateral * 2.0;
-
-          avoidX += -dirY * steerSign * force;
-          avoidY += dirX * steerSign * force;
-        }
-      }
-
-      // Combine forward path and avoidance steering
-      let moveDirX = dirX + avoidX;
-      let moveDirY = dirY + avoidY;
-      const mag = Math.hypot(moveDirX, moveDirY);
-      if (mag > 0.001) {
-        moveDirX /= mag;
-        moveDirY /= mag;
-      } else {
-        moveDirX = dirX;
-        moveDirY = dirY;
-      }
-
-      const stepX = moveDirX * unit.speed;
-      const stepY = moveDirY * unit.speed;
+      const stepX = Math.cos(bestAngle) * unit.speed;
+      const stepY = Math.sin(bestAngle) * unit.speed;
 
       unit.x = this.clampToWorld(unit.x + stepX, true);
       unit.y = this.clampToWorld(unit.y + stepY, false);
-      unit.hullAngle = Math.atan2(moveDirY, moveDirX);
+      unit.hullAngle = bestAngle;
       unit.turretAngle = unit.hullAngle;
+
+      // Track anti-stall progress
+      const movedDist = Math.hypot(unit.x - unit.prevX, unit.y - unit.prevY);
+      if (movedDist < 0.3) {
+        unit.stuckTicks = (unit.stuckTicks || 0) + 1;
+      } else {
+        unit.stuckTicks = 0;
+      }
+
+      if (unit.stuckTicks > 25) {
+        unit.stuckTicks = 0;
+        if (unit.type === 'HARVESTER') {
+          if (unit.harvesterState === 'MOVING_TO_TIBERIUM') {
+            unit.targetX = null;
+            unit.targetY = null;
+            unit.harvesterState = 'IDLE';
+          }
+        } else {
+          unit.targetX = null;
+          unit.targetY = null;
+        }
+      }
     }
 
     // 2. Unit-to-Unit separation: STRICTLY protect stationary units from being displaced
@@ -821,9 +880,16 @@ export class GameEngine {
       }
     }
 
-    // 3. Push units outside of solid building footprints
+    // 3. Push units outside of solid building footprints (skip docking Harvester at target refinery)
     for (const unit of unitList) {
       for (const b of this.buildings.values()) {
+        if (
+          (unit.harvesterState === 'MOVING_TO_REFINERY' || unit.harvesterState === 'UNLOADING') &&
+          b.id === unit.targetRefineryId
+        ) {
+          continue;
+        }
+
         const left = b.gridX * TILE_SIZE;
         const right = (b.gridX + b.widthTiles) * TILE_SIZE;
         const top = b.gridY * TILE_SIZE;
