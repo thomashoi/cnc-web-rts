@@ -104,13 +104,17 @@ async function bootstrap() {
   // SIDEBAR UI INITIALIZATION
   // ============================================================================
   const structureTypes: BuildingType[] = ['POWER_PLANT', 'REFINERY', 'BARRACKS', 'WAR_FACTORY'];
-  const unitTypes: UnitType[] = ['LIGHT_INFANTRY', 'MEDIUM_TANK', 'HARVESTER', 'MCV'];
+  const infantryTypes: UnitType[] = ['LIGHT_INFANTRY'];
+  const vehicleTypes: UnitType[] = ['MEDIUM_TANK', 'HARVESTER', 'MCV'];
 
   const gridStructuresEl = document.getElementById('grid-structures')!;
-  const gridUnitsEl = document.getElementById('grid-units')!;
+  const gridInfantryEl = document.getElementById('grid-infantry')!;
+  const gridVehiclesEl = document.getElementById('grid-vehicles')!;
+
   const btnDeployMcv = document.getElementById('btn-deploy-mcv') as HTMLButtonElement;
   const btnCancelBldg = document.getElementById('btn-cancel-bldg') as HTMLButtonElement;
-  const btnCancelUnit = document.getElementById('btn-cancel-unit') as HTMLButtonElement;
+  const btnCancelInfantry = document.getElementById('btn-cancel-infantry') as HTMLButtonElement;
+  const btnCancelVehicle = document.getElementById('btn-cancel-vehicle') as HTMLButtonElement;
   const placementBanner = document.getElementById('placement-banner')!;
 
   const cardElements: Map<BuildingType | UnitType, HTMLDivElement> = new Map();
@@ -136,7 +140,7 @@ async function bootstrap() {
       cardElements.set(bKey, card);
     }
 
-    for (const uKey of unitTypes) {
+    for (const uKey of infantryTypes) {
       const entry = CATALOG[uKey];
       const card = document.createElement('div');
       card.className = 'build-card';
@@ -148,7 +152,23 @@ async function bootstrap() {
       card.addEventListener('click', () => {
         engine.issueCommand({ type: 'START_PRODUCTION', itemType: uKey });
       });
-      gridUnitsEl.appendChild(card);
+      gridInfantryEl.appendChild(card);
+      cardElements.set(uKey, card);
+    }
+
+    for (const uKey of vehicleTypes) {
+      const entry = CATALOG[uKey];
+      const card = document.createElement('div');
+      card.className = 'build-card';
+      card.innerHTML = `
+        <div class="build-title">${entry.name}</div>
+        <div class="build-cost">$${entry.cost}</div>
+        <div class="build-req" id="req-${uKey}"></div>
+      `;
+      card.addEventListener('click', () => {
+        engine.issueCommand({ type: 'START_PRODUCTION', itemType: uKey });
+      });
+      gridVehiclesEl.appendChild(card);
       cardElements.set(uKey, card);
     }
   }
@@ -168,8 +188,12 @@ async function bootstrap() {
     engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'BUILDING' });
   });
 
-  btnCancelUnit.addEventListener('click', () => {
-    engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'UNIT' });
+  btnCancelInfantry.addEventListener('click', () => {
+    engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'INFANTRY' });
+  });
+
+  btnCancelVehicle.addEventListener('click', () => {
+    engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'VEHICLE' });
   });
 
   // ============================================================================
@@ -573,8 +597,10 @@ async function bootstrap() {
   const elPowerBar = document.getElementById('stat-power-bar')!;
   const elStatusBldg = document.getElementById('status-bldg')!;
   const elProgBldg = document.getElementById('prog-bldg')!;
-  const elStatusUnit = document.getElementById('status-unit')!;
-  const elProgUnit = document.getElementById('prog-unit')!;
+  const elStatusInfantry = document.getElementById('status-infantry')!;
+  const elProgInfantry = document.getElementById('prog-infantry')!;
+  const elStatusVehicle = document.getElementById('status-vehicle')!;
+  const elProgVehicle = document.getElementById('prog-vehicle')!;
 
   let wasBuildingReadyLastFrame = false;
 
@@ -642,20 +668,36 @@ async function bootstrap() {
       elProgBldg.style.width = '0%';
     }
 
-    // Unit Queue Progress
-    if (engine.unitQueue) {
-      btnCancelUnit.style.display = 'inline-block';
+    // Infantry Queue Progress (Barracks)
+    if (engine.infantryQueue) {
+      btnCancelInfantry.style.display = 'inline-block';
       const pct = Math.floor(
-        (engine.unitQueue.completedTicks / engine.unitQueue.totalTicks) * 100
+        (engine.infantryQueue.completedTicks / engine.infantryQueue.totalTicks) * 100
       );
-      elProgUnit.style.width = `${pct}%`;
-      elStatusUnit.textContent = engine.unitQueue.onHold
+      elProgInfantry.style.width = `${pct}%`;
+      elStatusInfantry.textContent = engine.infantryQueue.onHold
         ? 'ON HOLD (NO FUNDS)'
-        : `${CATALOG[engine.unitQueue.itemType].name} (${pct}%)`;
+        : `${CATALOG[engine.infantryQueue.itemType].name} (${pct}%)`;
     } else {
-      btnCancelUnit.style.display = 'none';
-      elStatusUnit.textContent = 'Idle';
-      elProgUnit.style.width = '0%';
+      btnCancelInfantry.style.display = 'none';
+      elStatusInfantry.textContent = 'Idle';
+      elProgInfantry.style.width = '0%';
+    }
+
+    // Vehicle Queue Progress (War Factory)
+    if (engine.vehicleQueue) {
+      btnCancelVehicle.style.display = 'inline-block';
+      const pct = Math.floor(
+        (engine.vehicleQueue.completedTicks / engine.vehicleQueue.totalTicks) * 100
+      );
+      elProgVehicle.style.width = `${pct}%`;
+      elStatusVehicle.textContent = engine.vehicleQueue.onHold
+        ? 'ON HOLD (NO FUNDS)'
+        : `${CATALOG[engine.vehicleQueue.itemType].name} (${pct}%)`;
+    } else {
+      btnCancelVehicle.style.display = 'none';
+      elStatusVehicle.textContent = 'Idle';
+      elProgVehicle.style.width = '0%';
     }
   }
 

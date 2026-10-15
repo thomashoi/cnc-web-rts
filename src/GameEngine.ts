@@ -20,9 +20,14 @@ export class GameEngine {
   public commandQueue: GameCommand[] = [];
   public lastCommandText = 'Select MCV & press [D] to deploy';
 
-  // Dual C&C Production Queues (Structures vs Units)
+  // Triple C&C Production Queues (Structures, Infantry at Barracks, Vehicles at War Factory)
   public buildingQueue: ProductionItem | null = null;
-  public unitQueue: ProductionItem | null = null;
+  public infantryQueue: ProductionItem | null = null;
+  public vehicleQueue: ProductionItem | null = null;
+
+  public get unitQueue(): ProductionItem | null {
+    return this.vehicleQueue || this.infantryQueue;
+  }
 
   private nextEntityId = 1;
 
@@ -345,22 +350,38 @@ export class GameEngine {
       if (this.buildingQueue) return;
       this.buildingQueue = prodItem;
       this.lastCommandText = `Constructing ${entry.name}...`;
-    } else {
-      if (this.unitQueue) return;
-      this.unitQueue = prodItem;
+    } else if (entry.category === 'INFANTRY') {
+      if (this.infantryQueue) return;
+      this.infantryQueue = prodItem;
       this.lastCommandText = `Training ${entry.name}...`;
+    } else if (entry.category === 'VEHICLE') {
+      if (this.vehicleQueue) return;
+      this.vehicleQueue = prodItem;
+      this.lastCommandText = `Building ${entry.name}...`;
     }
   }
 
-  private executeCancelProduction(category: 'BUILDING' | 'UNIT'): void {
+  private executeCancelProduction(category: 'BUILDING' | 'INFANTRY' | 'VEHICLE' | 'UNIT'): void {
     if (category === 'BUILDING' && this.buildingQueue) {
       this.credits += Math.round(this.buildingQueue.paidCost);
       this.buildingQueue = null;
       this.lastCommandText = 'Structure construction cancelled (Refunded)';
-    } else if (category === 'UNIT' && this.unitQueue) {
-      this.credits += Math.round(this.unitQueue.paidCost);
-      this.unitQueue = null;
-      this.lastCommandText = 'Unit production cancelled (Refunded)';
+    } else if (category === 'INFANTRY' && this.infantryQueue) {
+      this.credits += Math.round(this.infantryQueue.paidCost);
+      this.infantryQueue = null;
+      this.lastCommandText = 'Infantry training cancelled (Refunded)';
+    } else if (category === 'VEHICLE' && this.vehicleQueue) {
+      this.credits += Math.round(this.vehicleQueue.paidCost);
+      this.vehicleQueue = null;
+      this.lastCommandText = 'Vehicle construction cancelled (Refunded)';
+    } else if (category === 'UNIT') {
+      if (this.vehicleQueue) {
+        this.credits += Math.round(this.vehicleQueue.paidCost);
+        this.vehicleQueue = null;
+      } else if (this.infantryQueue) {
+        this.credits += Math.round(this.infantryQueue.paidCost);
+        this.infantryQueue = null;
+      }
     }
   }
 
@@ -388,11 +409,19 @@ export class GameEngine {
       this.stepSingleQueue(this.buildingQueue);
     }
 
-    if (this.unitQueue && canStepThisTick) {
-      this.stepSingleQueue(this.unitQueue);
-      if (this.unitQueue && this.unitQueue.readyToPlace) {
-        this.spawnCompletedUnit(this.unitQueue.itemType as UnitType);
-        this.unitQueue = null;
+    if (this.infantryQueue && canStepThisTick) {
+      this.stepSingleQueue(this.infantryQueue);
+      if (this.infantryQueue && this.infantryQueue.readyToPlace) {
+        this.spawnCompletedUnit(this.infantryQueue.itemType as UnitType);
+        this.infantryQueue = null;
+      }
+    }
+
+    if (this.vehicleQueue && canStepThisTick) {
+      this.stepSingleQueue(this.vehicleQueue);
+      if (this.vehicleQueue && this.vehicleQueue.readyToPlace) {
+        this.spawnCompletedUnit(this.vehicleQueue.itemType as UnitType);
+        this.vehicleQueue = null;
       }
     }
   }
@@ -707,7 +736,49 @@ export class GameEngine {
       if (destinationBlocked) continue;
 
       const targetAngle = Math.atan2(toTargetY, toTargetX);
-      const probeDist = unit.radius + unit.speed * 5 + 14;
+      const probeDist = unit.radius + unit.speed * 5 + 16;
+
+      // 1. Gather nearby stationary obstacles to detect impassable pinch gaps (e.g. 2 minigunners)
+      const nearbyStationary: UnitEntity[] = [];
+      for (const other of unitList) {
+        if (other.id === unit.id) continue;
+        if (other.targetX === null && other.targetY === null) {
+          const d = Math.hypot(other.x - unit.x, other.y - unit.y);
+          if (d <= probeDist + other.radius + 16) {
+            nearbyStationary.push(other);
+          }
+        }
+      }
+
+      // Impassable barriers between two stationary units that are too close for this unit to fit through
+      const minPassableGap = unit.radius * 2 + 4;
+      interface BarrierSegment {
+        x1: number;
+        y1: number;
+        x2: number;
+        y2: number;
+      }
+      const barriers: BarrierSegment[] = [];
+      for (let i = 0; i < nearbyStationary.length; i++) {
+        for (let j = i + 1; j < nearbyStationary.length; j++) {
+          const s1 = nearbyStationary[i];
+          const s2 = nearbyStationary[j];
+          const d12 = Math.hypot(s2.x - s1.x, s2.y - s1.y);
+          const gap = d12 - (s1.radius + s2.radius);
+          if (gap < minPassableGap) {
+            barriers.push({ x1: s1.x, y1: s1.y, x2: s2.x, y2: s2.y });
+          }
+        }
+      }
+
+      const ccw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) =>
+        (cy - ay) * (bx - ax) > (by - ay) * (cx - ax);
+      const lineIntersects = (
+        p1x: number, p1y: number, p2x: number, p2y: number,
+        q1x: number, q1y: number, q2x: number, q2y: number
+      ) =>
+        ccw(p1x, p1y, q1x, q1y, q2x, q2y) !== ccw(p2x, p2y, q1x, q1y, q2x, q2y) &&
+        ccw(p1x, p1y, p2x, p2y, q1x, q1y) !== ccw(p1x, p1y, p2x, p2y, q2x, q2y);
 
       // Candidate angle offsets relative to target heading
       const candidateOffsets = [
@@ -732,6 +803,17 @@ export class GameEngine {
         // Desirability: prefer angles aligned with the target
         let score = Math.cos(offset) * 2.0;
         let maxDanger = 0;
+
+        const rayEndX = unit.x + rx * probeDist;
+        const rayEndY = unit.y + ry * probeDist;
+
+        // Check if ray tries to penetrate an impassable narrow gap between two stationary units
+        for (const b of barriers) {
+          if (lineIntersects(unit.x, unit.y, rayEndX, rayEndY, b.x1, b.y1, b.x2, b.y2)) {
+            maxDanger = Math.max(maxDanger, 4.0);
+            break;
+          }
+        }
 
         // Danger from other units (especially stationary units)
         for (const other of unitList) {
@@ -812,23 +894,36 @@ export class GameEngine {
 
       // Track anti-stall progress
       const movedDist = Math.hypot(unit.x - unit.prevX, unit.y - unit.prevY);
-      if (movedDist < 0.3) {
+      if (movedDist < 0.35) {
         unit.stuckTicks = (unit.stuckTicks || 0) + 1;
       } else {
         unit.stuckTicks = 0;
       }
 
-      if (unit.stuckTicks > 25) {
+      // If unit is wedged/stuck for > 12 ticks (~0.6s), pop out of pinch
+      if (unit.stuckTicks > 12) {
         unit.stuckTicks = 0;
-        if (unit.type === 'HARVESTER') {
-          if (unit.harvesterState === 'MOVING_TO_TIBERIUM') {
-            unit.targetX = null;
-            unit.targetY = null;
-            unit.harvesterState = 'IDLE';
+        let repelX = 0;
+        let repelY = 0;
+        for (const s of nearbyStationary) {
+          const d = Math.hypot(unit.x - s.x, unit.y - s.y);
+          if (d > 0 && d < unit.radius + s.radius + 8) {
+            repelX += (unit.x - s.x) / d;
+            repelY += (unit.y - s.y) / d;
           }
+        }
+        const repelMag = Math.hypot(repelX, repelY);
+        if (repelMag > 0.01) {
+          unit.x = this.clampToWorld(unit.x + (repelX / repelMag) * 10, true);
+          unit.y = this.clampToWorld(unit.y + (repelY / repelMag) * 10, false);
         } else {
+          unit.x = this.clampToWorld(unit.x + (unit.id % 2 === 0 ? 10 : -10), true);
+        }
+
+        if (unit.type === 'HARVESTER' && unit.harvesterState === 'MOVING_TO_TIBERIUM') {
           unit.targetX = null;
           unit.targetY = null;
+          unit.harvesterState = 'IDLE';
         }
       }
     }

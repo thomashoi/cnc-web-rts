@@ -62,7 +62,7 @@ export interface BuildingEntity {
 }
 
 export interface ProductionItem {
-  category: 'BUILDING' | 'UNIT';
+  category: 'BUILDING' | 'INFANTRY' | 'VEHICLE';
   itemType: BuildingType | UnitType;
   totalCost: number;
   paidCost: number;
@@ -74,7 +74,7 @@ export interface ProductionItem {
 
 export interface CatalogEntry {
   key: BuildingType | UnitType;
-  category: 'BUILDING' | 'UNIT';
+  category: 'BUILDING' | 'INFANTRY' | 'VEHICLE';
   name: string;
   cost: number;
   buildTicks: number;
@@ -154,7 +154,7 @@ export const CATALOG: Record<BuildingType | UnitType, CatalogEntry> = {
   },
   LIGHT_INFANTRY: {
     key: 'LIGHT_INFANTRY',
-    category: 'UNIT',
+    category: 'INFANTRY',
     name: 'Minigunner',
     cost: 100,
     buildTicks: 40,
@@ -163,7 +163,7 @@ export const CATALOG: Record<BuildingType | UnitType, CatalogEntry> = {
   },
   MEDIUM_TANK: {
     key: 'MEDIUM_TANK',
-    category: 'UNIT',
+    category: 'VEHICLE',
     name: 'Medium Tank',
     cost: 800,
     buildTicks: 90,
@@ -172,7 +172,7 @@ export const CATALOG: Record<BuildingType | UnitType, CatalogEntry> = {
   },
   HARVESTER: {
     key: 'HARVESTER',
-    category: 'UNIT',
+    category: 'VEHICLE',
     name: 'Harvester',
     cost: 1200,
     buildTicks: 110,
@@ -181,7 +181,7 @@ export const CATALOG: Record<BuildingType | UnitType, CatalogEntry> = {
   },
   MCV: {
     key: 'MCV',
-    category: 'UNIT',
+    category: 'VEHICLE',
     name: 'M.C.V.',
     cost: 2500,
     buildTicks: 150,
@@ -214,7 +214,7 @@ export interface StartProductionCommand {
 export interface CancelProductionCommand {
   tick: number;
   type: 'CANCEL_PRODUCTION';
-  category: 'BUILDING' | 'UNIT';
+  category: 'BUILDING' | 'INFANTRY' | 'VEHICLE' | 'UNIT';
 }
 
 export interface PlaceBuildingCommand {
