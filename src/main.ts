@@ -1,7 +1,6 @@
 import { Application, Container, Graphics } from 'pixi.js';
 import { GameEngine } from './GameEngine';
 import {
-  BuildingEntity,
   BuildingType,
   CATALOG,
   GAME_CONFIG,
@@ -15,7 +14,7 @@ async function bootstrap() {
 
   await app.init({
     resizeTo: viewport,
-    backgroundColor: 0x141814,
+    backgroundColor: 0x0b0e0b,
     antialias: true,
     resolution: window.devicePixelRatio || 1,
     autoDensity: true,
@@ -32,6 +31,8 @@ async function bootstrap() {
   const tiberiumGraphics = new Graphics();
   const buildingGraphics = new Graphics();
   const unitGraphics = new Graphics();
+  const projectileGraphics = new Graphics();
+  const fogGraphics = new Graphics();
   const placementGraphics = new Graphics();
   const uiOverlayGraphics = new Graphics();
 
@@ -39,13 +40,15 @@ async function bootstrap() {
   worldContainer.addChild(tiberiumGraphics);
   worldContainer.addChild(buildingGraphics);
   worldContainer.addChild(unitGraphics);
+  worldContainer.addChild(projectileGraphics);
+  worldContainer.addChild(fogGraphics);
   worldContainer.addChild(placementGraphics);
   app.stage.addChild(worldContainer);
   app.stage.addChild(uiOverlayGraphics);
 
-  // Camera & Mouse State
+  // Camera & Interaction State
   const camera = {
-    x: -140,
+    x: -110,
     y: -120,
     zoom: 1,
     panSpeed: 10,
@@ -56,6 +59,7 @@ async function bootstrap() {
 
   const mouseScreen = { x: 0, y: 0 };
   let isPlacementMode = false;
+  let isAttackMoveMode = false;
 
   const selectionBox = {
     active: false,
@@ -65,11 +69,10 @@ async function bootstrap() {
     currY: 0,
   };
 
-  let moveOrderMarker: { x: number; y: number; alpha: number } | null = null;
+  let orderMarker: { x: number; y: number; alpha: number; color: number } | null = null;
   const controlGroups: Map<string, number[]> = new Map();
   const keysPressed: Set<string> = new Set();
 
-  // Draw static map grid
   function drawStaticGrid(): void {
     terrainGraphics.clear();
     const { MAP_COLS, MAP_ROWS, TILE_SIZE } = GAME_CONFIG;
@@ -103,19 +106,30 @@ async function bootstrap() {
   // ============================================================================
   // SIDEBAR UI INITIALIZATION
   // ============================================================================
-  const structureTypes: BuildingType[] = ['POWER_PLANT', 'REFINERY', 'BARRACKS', 'WAR_FACTORY'];
-  const infantryTypes: UnitType[] = ['LIGHT_INFANTRY'];
-  const vehicleTypes: UnitType[] = ['MEDIUM_TANK', 'HARVESTER', 'MCV'];
+  const structureTypes: BuildingType[] = [
+    'POWER_PLANT',
+    'REFINERY',
+    'BARRACKS',
+    'GUARD_TOWER',
+    'WAR_FACTORY',
+    'RADAR_DOME',
+  ];
+  const unitTypes: UnitType[] = [
+    'LIGHT_INFANTRY',
+    'ROCKET_SOLDIER',
+    'MEDIUM_TANK',
+    'HARVESTER',
+    'MCV',
+  ];
 
   const gridStructuresEl = document.getElementById('grid-structures')!;
-  const gridInfantryEl = document.getElementById('grid-infantry')!;
-  const gridVehiclesEl = document.getElementById('grid-vehicles')!;
-
+  const gridUnitsEl = document.getElementById('grid-units')!;
   const btnDeployMcv = document.getElementById('btn-deploy-mcv') as HTMLButtonElement;
+  const btnAttackMove = document.getElementById('btn-attack-move') as HTMLButtonElement;
+  const btnToggleFog = document.getElementById('btn-toggle-fog') as HTMLButtonElement;
   const btnCancelBldg = document.getElementById('btn-cancel-bldg') as HTMLButtonElement;
-  const btnCancelInfantry = document.getElementById('btn-cancel-infantry') as HTMLButtonElement;
-  const btnCancelVehicle = document.getElementById('btn-cancel-vehicle') as HTMLButtonElement;
-  const placementBanner = document.getElementById('placement-banner')!;
+  const btnCancelUnit = document.getElementById('btn-cancel-unit') as HTMLButtonElement;
+  const modeBanner = document.getElementById('mode-banner')!;
 
   const cardElements: Map<BuildingType | UnitType, HTMLDivElement> = new Map();
 
@@ -132,6 +146,7 @@ async function bootstrap() {
       card.addEventListener('click', () => {
         if (engine.buildingQueue?.readyToPlace && engine.buildingQueue.itemType === bKey) {
           isPlacementMode = true;
+          isAttackMoveMode = false;
           return;
         }
         engine.issueCommand({ type: 'START_PRODUCTION', itemType: bKey });
@@ -140,7 +155,7 @@ async function bootstrap() {
       cardElements.set(bKey, card);
     }
 
-    for (const uKey of infantryTypes) {
+    for (const uKey of unitTypes) {
       const entry = CATALOG[uKey];
       const card = document.createElement('div');
       card.className = 'build-card';
@@ -152,23 +167,7 @@ async function bootstrap() {
       card.addEventListener('click', () => {
         engine.issueCommand({ type: 'START_PRODUCTION', itemType: uKey });
       });
-      gridInfantryEl.appendChild(card);
-      cardElements.set(uKey, card);
-    }
-
-    for (const uKey of vehicleTypes) {
-      const entry = CATALOG[uKey];
-      const card = document.createElement('div');
-      card.className = 'build-card';
-      card.innerHTML = `
-        <div class="build-title">${entry.name}</div>
-        <div class="build-cost">$${entry.cost}</div>
-        <div class="build-req" id="req-${uKey}"></div>
-      `;
-      card.addEventListener('click', () => {
-        engine.issueCommand({ type: 'START_PRODUCTION', itemType: uKey });
-      });
-      gridVehiclesEl.appendChild(card);
+      gridUnitsEl.appendChild(card);
       cardElements.set(uKey, card);
     }
   }
@@ -176,11 +175,21 @@ async function bootstrap() {
 
   btnDeployMcv.addEventListener('click', () => {
     const selectedMcv = Array.from(engine.units.values()).find(
-      (u) => u.selected && u.type === 'MCV'
+      (u) => u.ownerId === 1 && u.selected && u.type === 'MCV'
     );
     if (selectedMcv) {
       engine.issueCommand({ type: 'DEPLOY_MCV', unitId: selectedMcv.id });
     }
+  });
+
+  btnAttackMove.addEventListener('click', () => {
+    isAttackMoveMode = !isAttackMoveMode;
+    if (isAttackMoveMode) isPlacementMode = false;
+  });
+
+  btnToggleFog.addEventListener('click', () => {
+    engine.fogEnabled = !engine.fogEnabled;
+    btnToggleFog.textContent = `FOG OF WAR: ${engine.fogEnabled ? 'ON' : 'OFF'} [F]`;
   });
 
   btnCancelBldg.addEventListener('click', () => {
@@ -188,13 +197,32 @@ async function bootstrap() {
     engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'BUILDING' });
   });
 
-  btnCancelInfantry.addEventListener('click', () => {
-    engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'INFANTRY' });
+  btnCancelUnit.addEventListener('click', () => {
+    engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'UNIT' });
   });
 
-  btnCancelVehicle.addEventListener('click', () => {
-    engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'VEHICLE' });
-  });
+  // Helper: Find hostile entity under world coordinates
+  function findHostileAtWorldPos(wx: number, wy: number): number | null {
+    for (const u of engine.units.values()) {
+      if (u.ownerId === 1) continue;
+      if (!engine.isWorldPosVisibleToPlayer(u.x, u.y)) continue;
+      if (Math.hypot(u.x - wx, u.y - wy) <= u.radius + 8) {
+        return u.id;
+      }
+    }
+    const { TILE_SIZE } = GAME_CONFIG;
+    for (const b of engine.buildings.values()) {
+      if (b.ownerId === 1) continue;
+      const left = b.gridX * TILE_SIZE;
+      const right = (b.gridX + b.widthTiles) * TILE_SIZE;
+      const top = b.gridY * TILE_SIZE;
+      const bottom = (b.gridY + b.heightTiles) * TILE_SIZE;
+      if (wx >= left && wx <= right && wy >= top && wy <= bottom) {
+        return b.id;
+      }
+    }
+    return null;
+  }
 
   // ============================================================================
   // CANVAS POINTER & KEYBOARD INPUT
@@ -204,7 +232,11 @@ async function bootstrap() {
     const worldPos = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
 
     for (const u of engine.units.values()) {
-      if (u.type === 'MCV' && Math.hypot(u.x - worldPos.x, u.y - worldPos.y) <= u.radius + 8) {
+      if (
+        u.ownerId === 1 &&
+        u.type === 'MCV' &&
+        Math.hypot(u.x - worldPos.x, u.y - worldPos.y) <= u.radius + 8
+      ) {
         engine.issueCommand({ type: 'DEPLOY_MCV', unitId: u.id });
         break;
       }
@@ -218,7 +250,7 @@ async function bootstrap() {
     const worldPos = screenToWorld(sx, sy);
 
     if (e.button === 0) {
-      // If in Building Placement Mode, attempt to place on the grid
+      // 1. Building Placement Mode
       if (isPlacementMode && engine.buildingQueue?.readyToPlace) {
         const bType = engine.buildingQueue.itemType as BuildingType;
         const entry = CATALOG[bType];
@@ -235,7 +267,25 @@ async function bootstrap() {
         return;
       }
 
-      // Otherwise begin standard green box selection
+      // 2. Attack-Move Mode [A + Left-Click]
+      if (isAttackMoveMode) {
+        const selectedIds = Array.from(engine.units.values())
+          .filter((u) => u.ownerId === 1 && u.selected)
+          .map((u) => u.id);
+        if (selectedIds.length > 0) {
+          engine.issueCommand({
+            type: 'ATTACK_MOVE',
+            unitIds: selectedIds,
+            targetX: worldPos.x,
+            targetY: worldPos.y,
+          });
+          orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0xff4444 };
+        }
+        isAttackMoveMode = false;
+        return;
+      }
+
+      // 3. Standard Box Selection
       selectionBox.active = true;
       selectionBox.startX = sx;
       selectionBox.startY = sy;
@@ -246,20 +296,33 @@ async function bootstrap() {
       camera.lastMouseX = sx;
       camera.lastMouseY = sy;
     } else if (e.button === 2) {
-      // Right-click cancels placement preview if active
-      if (isPlacementMode) {
+      if (isPlacementMode || isAttackMoveMode) {
         isPlacementMode = false;
+        isAttackMoveMode = false;
         return;
       }
 
-      const selectedUnits = Array.from(engine.units.values()).filter((u) => u.selected);
+      const selectedUnits = Array.from(engine.units.values()).filter(
+        (u) => u.ownerId === 1 && u.selected
+      );
       if (selectedUnits.length === 0) return;
 
+      // 1. Check if Right-Clicking a Hostile Unit or Building -> Issue ATTACK Command
+      const hostileId = findHostileAtWorldPos(worldPos.x, worldPos.y);
+      if (hostileId !== null) {
+        engine.issueCommand({
+          type: 'ATTACK',
+          unitIds: selectedUnits.map((u) => u.id),
+          targetEntityId: hostileId,
+        });
+        orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0xff3333 };
+        return;
+      }
+
+      // 2. Check if Right-Clicking Refinery or Tiberium with Harvesters
       const { TILE_SIZE } = GAME_CONFIG;
       const clickedGX = Math.floor(worldPos.x / TILE_SIZE);
       const clickedGY = Math.floor(worldPos.y / TILE_SIZE);
-
-      // Check if right-clicking a Refinery or Tiberium patch with Harvesters selected
       const selectedHarvesterIds = selectedUnits
         .filter((u) => u.type === 'HARVESTER')
         .map((u) => u.id);
@@ -267,6 +330,7 @@ async function bootstrap() {
       if (selectedHarvesterIds.length > 0) {
         const clickedRefinery = Array.from(engine.buildings.values()).find(
           (b) =>
+            b.ownerId === 1 &&
             b.type === 'REFINERY' &&
             clickedGX >= b.gridX &&
             clickedGX < b.gridX + b.widthTiles &&
@@ -280,7 +344,7 @@ async function bootstrap() {
             unitIds: selectedHarvesterIds,
             refineryId: clickedRefinery.id,
           });
-          moveOrderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0 };
+          orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0x55ff77 };
           return;
         }
 
@@ -294,19 +358,19 @@ async function bootstrap() {
             targetGridX: clickedGX,
             targetGridY: clickedGY,
           });
-          moveOrderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0 };
+          orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0x55ff77 };
           return;
         }
       }
 
-      // Standard Move Order
+      // 3. Standard Move Command
       engine.issueCommand({
         type: 'MOVE',
         unitIds: selectedUnits.map((u) => u.id),
         targetX: worldPos.x,
         targetY: worldPos.y,
       });
-      moveOrderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0 };
+      orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0x55ff77 };
     }
   });
 
@@ -343,6 +407,7 @@ async function bootstrap() {
       const p2 = screenToWorld(maxSX, maxSY);
 
       for (const unit of engine.units.values()) {
+        if (unit.ownerId !== 1) continue;
         if (!isShift) unit.selected = false;
 
         if (isSingleClick) {
@@ -372,32 +437,44 @@ async function bootstrap() {
     const key = e.key.toLowerCase();
     keysPressed.add(key);
 
-    // Hotkey 'D' deploys selected MCV
     if (key === 'd' && !e.ctrlKey && !e.metaKey) {
+      // Only deploy MCV if 'D' is pressed while an MCV is selected and not panning
       const selectedMcv = Array.from(engine.units.values()).find(
-        (u) => u.selected && u.type === 'MCV'
+        (u) => u.ownerId === 1 && u.selected && u.type === 'MCV'
       );
       if (selectedMcv) {
         engine.issueCommand({ type: 'DEPLOY_MCV', unitId: selectedMcv.id });
       }
-    }
-
-    if (key === 'escape' && isPlacementMode) {
+    } else if (key === 'a' && !e.ctrlKey && !e.metaKey) {
+      const hasSelected = Array.from(engine.units.values()).some(
+        (u) => u.ownerId === 1 && u.selected
+      );
+      if (hasSelected) {
+        isAttackMoveMode = true;
+        isPlacementMode = false;
+      }
+    } else if (key === 'f' && !e.ctrlKey && !e.metaKey) {
+      engine.fogEnabled = !engine.fogEnabled;
+      btnToggleFog.textContent = `FOG OF WAR: ${engine.fogEnabled ? 'ON' : 'OFF'} [F]`;
+    } else if (key === 'escape') {
       isPlacementMode = false;
+      isAttackMoveMode = false;
     }
 
     if (/^[1-9]$/.test(e.key)) {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const ids = Array.from(engine.units.values())
-          .filter((u) => u.selected)
+          .filter((u) => u.ownerId === 1 && u.selected)
           .map((u) => u.id);
         if (ids.length > 0) controlGroups.set(e.key, ids);
       } else {
         const groupIds = controlGroups.get(e.key);
         if (groupIds) {
           for (const unit of engine.units.values()) {
-            unit.selected = groupIds.includes(unit.id);
+            if (unit.ownerId === 1) {
+              unit.selected = groupIds.includes(unit.id);
+            }
           }
         }
       }
@@ -409,7 +486,7 @@ async function bootstrap() {
   });
 
   // ============================================================================
-  // RENDERING HELPERS (TIBERIUM, STRUCTURES, UNITS, FOOTPRINT)
+  // RENDERING HELPERS (TIBERIUM, STRUCTURES, UNITS, PROJECTILES, FOG OF WAR)
   // ============================================================================
   function drawTiberiumPatches(): void {
     tiberiumGraphics.clear();
@@ -417,6 +494,8 @@ async function bootstrap() {
 
     for (const patch of engine.tiberiumPatches) {
       if (patch.amount <= 0) continue;
+      if (engine.fogEnabled && engine.fogGrid[patch.gridY][patch.gridX] === 0) continue;
+
       const cx = patch.gridX * TILE_SIZE + TILE_SIZE / 2;
       const cy = patch.gridY * TILE_SIZE + TILE_SIZE / 2;
       const scale = Math.max(0.35, patch.amount / 100);
@@ -433,74 +512,124 @@ async function bootstrap() {
     const { TILE_SIZE } = GAME_CONFIG;
 
     for (const b of engine.buildings.values()) {
+      // Hide unexplored enemy structures under Black Shroud
+      if (
+        b.ownerId !== 1 &&
+        engine.fogEnabled &&
+        engine.fogGrid[b.gridY][b.gridX] === 0
+      ) {
+        continue;
+      }
+
       const x = b.gridX * TILE_SIZE;
       const y = b.gridY * TILE_SIZE;
       const w = b.widthTiles * TILE_SIZE;
       const h = b.heightTiles * TILE_SIZE;
+      const isGDI = b.ownerId === 1;
+      const primaryColor = isGDI ? 0xd4af37 : 0xd93838;
+      const darkFill = isGDI ? 0x8f7224 : 0x7a1f1f;
 
-      // Foundation pad
       buildingGraphics
         .rect(x + 3, y + 3, w - 6, h - 6)
-        .fill({ color: 0x2c322c })
-        .stroke({ width: 2, color: 0xd4af37 });
+        .fill({ color: 0x262b26 })
+        .stroke({ width: 2, color: primaryColor });
 
       if (b.type === 'CONSTRUCTION_YARD') {
-        buildingGraphics.rect(x + 12, y + 12, w - 24, h - 24).fill({ color: 0x8f7224 });
-        buildingGraphics.circle(x + w * 0.35, y + h * 0.35, 18).fill({ color: 0xd4af37 });
-        buildingGraphics
-          .moveTo(x + w * 0.35, y + h * 0.35)
-          .lineTo(x + w * 0.78, y + h * 0.75)
-          .stroke({ width: 6, color: 0xe6c34a });
+        buildingGraphics.rect(x + 12, y + 12, w - 24, h - 24).fill({ color: darkFill });
+        buildingGraphics.circle(x + w * 0.35, y + h * 0.35, 18).fill({ color: primaryColor });
       } else if (b.type === 'POWER_PLANT') {
         buildingGraphics.circle(x + w * 0.35, y + h * 0.5, 16).fill({ color: 0x4b594d });
         buildingGraphics.circle(x + w * 0.35, y + h * 0.5, 9).fill({ color: 0x55ff77 });
-        buildingGraphics.rect(x + w * 0.6, y + 14, 18, h - 28).fill({ color: 0xc59b27 });
+        buildingGraphics.rect(x + w * 0.6, y + 14, 18, h - 28).fill({ color: primaryColor });
       } else if (b.type === 'REFINERY') {
-        // Silo tanks + Bottom harvester unloading bay
-        buildingGraphics.rect(x + 10, y + 10, w - 20, h * 0.55).fill({ color: 0x99792c });
+        buildingGraphics.rect(x + 10, y + 10, w - 20, h * 0.55).fill({ color: darkFill });
         buildingGraphics.circle(x + 28, y + 28, 12).fill({ color: 0x2ee65f });
         buildingGraphics.circle(x + 58, y + 28, 12).fill({ color: 0x2ee65f });
-        // Docking bay apron
         buildingGraphics
           .rect(x + w * 0.25, y + h * 0.62, w * 0.5, h * 0.33)
           .fill({ color: 0x1b241d })
-          .stroke({ width: 1.5, color: 0x55ff77 });
+          .stroke({ width: 1.5, color: primaryColor });
       } else if (b.type === 'BARRACKS') {
-        buildingGraphics.rect(x + 12, y + 12, w - 24, h - 24).fill({ color: 0x6e5c2b });
-        buildingGraphics.circle(x + w / 2, y + h / 2, 12).fill({ color: 0xd4af37 });
+        buildingGraphics.rect(x + 12, y + 12, w - 24, h - 24).fill({ color: darkFill });
+        buildingGraphics.circle(x + w / 2, y + h / 2, 12).fill({ color: primaryColor });
       } else if (b.type === 'WAR_FACTORY') {
-        buildingGraphics.rect(x + 8, y + 8, w - 16, h - 18).fill({ color: 0x7a6226 });
-        // Factory roof stripes & roll-out bay door
-        buildingGraphics.rect(x + 20, y + h - 18, w - 40, 12).fill({ color: 0xd4af37 });
+        buildingGraphics.rect(x + 8, y + 8, w - 16, h - 18).fill({ color: darkFill });
+        buildingGraphics.rect(x + 20, y + h - 18, w - 40, 12).fill({ color: primaryColor });
+      } else if (b.type === 'GUARD_TOWER') {
+        const cx = x + w / 2;
+        const cy = y + h / 2;
+        buildingGraphics.circle(cx, cy, 15).fill({ color: darkFill }).stroke({ width: 2, color: primaryColor });
+        const bx = cx + Math.cos(b.turretAngle) * 20;
+        const by = cy + Math.sin(b.turretAngle) * 20;
+        buildingGraphics.moveTo(cx, cy).lineTo(bx, by).stroke({ width: 4, color: 0xeeeeee });
+      } else if (b.type === 'RADAR_DOME') {
+        buildingGraphics.rect(x + 10, y + 10, w - 20, h - 20).fill({ color: darkFill });
+        buildingGraphics
+          .circle(x + w / 2, y + h / 2, 22)
+          .fill({ color: 0x1b2e20 })
+          .stroke({ width: 2, color: 0x55ff77 });
       }
 
       // Building HP Bar
-      const hpRatio = b.hp / b.maxHp;
+      const hpRatio = Math.max(0, b.hp / b.maxHp);
       buildingGraphics.rect(x + 6, y - 7, w - 12, 4).fill({ color: 0x111111 });
-      buildingGraphics.rect(x + 6, y - 7, (w - 12) * hpRatio, 4).fill({ color: 0x55ff77 });
+      buildingGraphics
+        .rect(x + 6, y - 7, (w - 12) * hpRatio, 4)
+        .fill({ color: isGDI ? 0x55ff77 : 0xff4444 });
     }
   }
 
   function drawUnit(unit: UnitEntity, rx: number, ry: number): void {
-    const r = unit.radius;
+    // Enemy mobile units are only rendered if inside currently VISIBLE (2) tiles
+    if (unit.ownerId !== 1 && !engine.isWorldPosVisibleToPlayer(unit.x, unit.y)) {
+      return;
+    }
 
-    if (unit.selected && unit.targetX !== null && unit.targetY !== null) {
-      unitGraphics
-        .moveTo(rx, ry)
-        .lineTo(unit.targetX, unit.targetY)
-        .stroke({ width: 1, color: 0x55ff77, alpha: 0.45 });
+    const r = unit.radius;
+    const isGDI = unit.ownerId === 1;
+    const hullColor = isGDI ? 0xd9a74a : 0xd93b3b;
+    const turretColor = isGDI ? 0xb8862d : 0x992222;
+
+    // Target or Waypoint Line when Selected
+    if (unit.selected) {
+      if (unit.targetEntityId !== null) {
+        const tPos = engine.getEntityWorldPos(unit.targetEntityId);
+        if (tPos) {
+          unitGraphics
+            .moveTo(rx, ry)
+            .lineTo(tPos.x, tPos.y)
+            .stroke({ width: 1.2, color: 0xff4444, alpha: 0.65 });
+        }
+      } else if (unit.targetX !== null && unit.targetY !== null) {
+        unitGraphics
+          .moveTo(rx, ry)
+          .lineTo(unit.targetX, unit.targetY)
+          .stroke({
+            width: 1,
+            color: unit.isAttackMove ? 0xff8844 : 0x55ff77,
+            alpha: 0.45,
+          });
+      }
     }
 
     if (unit.type === 'LIGHT_INFANTRY') {
-      unitGraphics.circle(rx, ry, r).fill({ color: 0xd4af37 }).stroke({ width: 1.5, color: 0x111111 });
+      unitGraphics.circle(rx, ry, r).fill({ color: hullColor }).stroke({ width: 1.5, color: 0x111111 });
+    } else if (unit.type === 'ROCKET_SOLDIER') {
+      unitGraphics.circle(rx, ry, r).fill({ color: hullColor }).stroke({ width: 2, color: 0xffffff });
+      const bx = rx + Math.cos(unit.turretAngle) * (r + 5);
+      const by = ry + Math.sin(unit.turretAngle) * (r + 5);
+      unitGraphics.moveTo(rx, ry).lineTo(bx, by).stroke({ width: 3, color: 0xff6633 });
     } else if (unit.type === 'MEDIUM_TANK') {
       unitGraphics
         .rect(rx - r, ry - r * 0.8, r * 2, r * 1.6)
-        .fill({ color: 0xd9a74a })
+        .fill({ color: hullColor })
         .stroke({ width: 2, color: 0x222222 });
-      unitGraphics.circle(rx, ry, r * 0.55).fill({ color: 0xb8862d }).stroke({ width: 1.5, color: 0x222222 });
-      const bx = rx + Math.cos(unit.turretAngle) * (r * 1.25);
-      const by = ry + Math.sin(unit.turretAngle) * (r * 1.25);
+      unitGraphics
+        .circle(rx, ry, r * 0.55)
+        .fill({ color: turretColor })
+        .stroke({ width: 1.5, color: 0x222222 });
+      const bx = rx + Math.cos(unit.turretAngle) * (r * 1.3);
+      const by = ry + Math.sin(unit.turretAngle) * (r * 1.3);
       unitGraphics.moveTo(rx, ry).lineTo(bx, by).stroke({ width: 4, color: 0x222222 });
     } else if (unit.type === 'HARVESTER') {
       unitGraphics
@@ -508,7 +637,6 @@ async function bootstrap() {
         .fill({ color: 0xe6b800 })
         .stroke({ width: 2, color: 0x1f1f1f });
 
-      // Harvester 5-pip Tiberium crystal load gauge
       const pips = 5;
       const filledPips = Math.round((unit.tiberiumLoad / unit.maxTiberiumLoad) * pips);
       for (let i = 0; i < pips; i++) {
@@ -516,41 +644,98 @@ async function bootstrap() {
           .rect(rx - r + 4 + i * 7, ry - 4, 5, 8)
           .fill({ color: i < filledPips ? 0x2ee65f : 0x2c352d });
       }
-
-      // Active harvesting beam / unloading effect
-      if (unit.harvesterState === 'HARVESTING') {
-        unitGraphics.circle(rx, ry, r + 5).stroke({ width: 2, color: 0x4dff79, alpha: 0.7 });
-      } else if (unit.harvesterState === 'UNLOADING') {
-        unitGraphics.circle(rx, ry, r + 6).stroke({ width: 2, color: 0xffdd44, alpha: 0.85 });
-      }
     } else if (unit.type === 'MCV') {
       unitGraphics
         .rect(rx - r, ry - r, r * 2, r * 2)
-        .fill({ color: 0xe0aa3e })
+        .fill({ color: hullColor })
         .stroke({ width: 2.5, color: 0x111111 });
       unitGraphics.circle(rx, ry, r * 0.5).fill({ color: 0x55ff77 });
     }
 
-    if (unit.selected) {
+    // Selection Brackets or Enemy Health Bar
+    if (unit.selected || !isGDI) {
       const b = r + 5;
-      unitGraphics.rect(rx - b, ry - b, b * 2, b * 2).stroke({ width: 1.5, color: 0x55ff77 });
-      const hpRatio = unit.hp / unit.maxHp;
+      if (unit.selected) {
+        unitGraphics.rect(rx - b, ry - b, b * 2, b * 2).stroke({ width: 1.5, color: 0x55ff77 });
+      }
+      const hpRatio = Math.max(0, unit.hp / unit.maxHp);
       unitGraphics.rect(rx - b, ry - b - 6, b * 2, 4).fill({ color: 0x111111 });
-      unitGraphics.rect(rx - b, ry - b - 6, b * 2 * hpRatio, 4).fill({ color: 0x55ff77 });
+      unitGraphics
+        .rect(rx - b, ry - b - 6, b * 2 * hpRatio, 4)
+        .fill({ color: isGDI ? 0x55ff77 : 0xff4444 });
+    }
+  }
+
+  function drawProjectilesAndExplosions(alpha: number): void {
+    projectileGraphics.clear();
+
+    for (const proj of engine.projectiles.values()) {
+      if (!engine.isWorldPosVisibleToPlayer(proj.x, proj.y)) continue;
+      const rx = proj.prevX + (proj.x - proj.prevX) * alpha;
+      const ry = proj.prevY + (proj.y - proj.prevY) * alpha;
+
+      if (proj.style === 'BULLET') {
+        projectileGraphics.circle(rx, ry, 2.5).fill({ color: 0xffee55 });
+      } else if (proj.style === 'SHELL') {
+        projectileGraphics.circle(rx, ry, 4.5).fill({ color: 0xffaa33 }).stroke({ width: 1, color: 0xffffff });
+      } else if (proj.style === 'ROCKET') {
+        projectileGraphics.circle(rx, ry, 4).fill({ color: 0xff4422 });
+        projectileGraphics.circle(proj.prevX, proj.prevY, 3).fill({ color: 0xaaaaaa, alpha: 0.6 });
+      }
+    }
+
+    for (const exp of engine.explosions) {
+      if (!engine.isWorldPosVisibleToPlayer(exp.x, exp.y)) continue;
+      const progress = exp.currentTick / exp.totalTicks;
+      const radius = exp.maxRadius * (0.3 + 0.7 * progress);
+      const fade = 1 - progress;
+      projectileGraphics
+        .circle(exp.x, exp.y, radius)
+        .fill({ color: exp.color, alpha: fade * 0.55 })
+        .stroke({ width: 2, color: 0xffffaa, alpha: fade });
+    }
+  }
+
+  function drawFogOfWar(): void {
+    fogGraphics.clear();
+    if (!engine.fogEnabled) return;
+
+    const { MAP_ROWS, MAP_COLS, TILE_SIZE } = GAME_CONFIG;
+    for (let r = 0; r < MAP_ROWS; r++) {
+      for (let c = 0; c < MAP_COLS; c++) {
+        const state = engine.fogGrid[r][c];
+        if (state === 0) {
+          // Unexplored Black Shroud
+          fogGraphics
+            .rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+            .fill({ color: 0x050705, alpha: 0.96 });
+        } else if (state === 1) {
+          // Explored Dimmed Fog
+          fogGraphics
+            .rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+            .fill({ color: 0x080c08, alpha: 0.55 });
+        }
+      }
     }
   }
 
   function drawPlacementPreview(): void {
     placementGraphics.clear();
 
-    // Auto-activate placement mode the moment a building finishes constructing
-    if (!engine.buildingQueue?.readyToPlace) {
-      isPlacementMode = false;
-      placementBanner.style.display = 'none';
+    if (isAttackMoveMode) {
+      modeBanner.style.display = 'block';
+      modeBanner.textContent = 'ATTACK-MOVE MODE: Left-Click Destination | Right-Click to Cancel';
       return;
     }
 
-    placementBanner.style.display = isPlacementMode ? 'block' : 'none';
+    if (!engine.buildingQueue?.readyToPlace) {
+      isPlacementMode = false;
+      modeBanner.style.display = 'none';
+      return;
+    }
+
+    modeBanner.style.display = isPlacementMode ? 'block' : 'none';
+    modeBanner.textContent = 'PLACEMENT MODE: Left-Click Green Tiles | Right-Click to Cancel';
     if (!isPlacementMode) return;
 
     const { TILE_SIZE, BASE_ADJACENCY_TILES } = GAME_CONFIG;
@@ -559,8 +744,8 @@ async function bootstrap() {
     const w = entry.widthTiles ?? 2;
     const h = entry.heightTiles ?? 2;
 
-    // Draw adjacency rings around existing friendly structures
     for (const b of engine.buildings.values()) {
+      if (b.ownerId !== 1) continue;
       const cx = (b.gridX + b.widthTiles / 2) * TILE_SIZE;
       const cy = (b.gridY + b.heightTiles / 2) * TILE_SIZE;
       placementGraphics
@@ -590,6 +775,7 @@ async function bootstrap() {
   const elTick = document.getElementById('stat-tick')!;
   const elSelected = document.getElementById('stat-selected')!;
   const elHarvesters = document.getElementById('stat-harvesters')!;
+  const elEnemies = document.getElementById('stat-enemies')!;
   const elCmd = document.getElementById('stat-cmd')!;
   const elCredits = document.getElementById('stat-credits')!;
   const elEconRate = document.getElementById('stat-econ-rate')!;
@@ -597,17 +783,15 @@ async function bootstrap() {
   const elPowerBar = document.getElementById('stat-power-bar')!;
   const elStatusBldg = document.getElementById('status-bldg')!;
   const elProgBldg = document.getElementById('prog-bldg')!;
-  const elStatusInfantry = document.getElementById('status-infantry')!;
-  const elProgInfantry = document.getElementById('prog-infantry')!;
-  const elStatusVehicle = document.getElementById('status-vehicle')!;
-  const elProgVehicle = document.getElementById('prog-vehicle')!;
+  const elStatusUnit = document.getElementById('status-unit')!;
+  const elProgUnit = document.getElementById('prog-unit')!;
 
   let wasBuildingReadyLastFrame = false;
 
   function syncSidebarUI(): void {
     elCredits.textContent = `$ ${Math.floor(engine.credits).toLocaleString()}`;
 
-    const power = engine.getPowerStats();
+    const power = engine.getPowerStats(1);
     elPowerText.textContent = `${power.produced} / ${power.consumed} MW`;
     const ratio = power.consumed === 0 ? 100 : Math.min(100, (power.produced / power.consumed) * 100);
     elPowerBar.style.width = `${ratio}%`;
@@ -615,15 +799,14 @@ async function bootstrap() {
     elEconRate.textContent = power.isLowPower ? 'LOW POWER (50% SPD)' : 'POWER NORMAL';
     elEconRate.style.color = power.isLowPower ? '#ff6666' : '#7a9a7e';
 
-    // Enable MCV Deploy button if an MCV is selected
     const mcvSelected = Array.from(engine.units.values()).some(
-      (u) => u.selected && u.type === 'MCV'
+      (u) => u.ownerId === 1 && u.selected && u.type === 'MCV'
     );
     btnDeployMcv.disabled = !mcvSelected;
+    btnAttackMove.classList.toggle('active-toggle', isAttackMoveMode);
 
-    // Update Prerequisite Locks on Cards
     for (const [key, card] of cardElements.entries()) {
-      const unlocked = engine.hasPrerequisites(key);
+      const unlocked = engine.hasPrerequisites(key, 1);
       const reqEl = document.getElementById(`req-${key}`)!;
       if (unlocked) {
         card.classList.remove('locked');
@@ -641,7 +824,6 @@ async function bootstrap() {
       }
     }
 
-    // Structure Queue Progress
     if (engine.buildingQueue) {
       btnCancelBldg.style.display = 'inline-block';
       const pct = Math.floor(
@@ -650,7 +832,7 @@ async function bootstrap() {
       elProgBldg.style.width = `${pct}%`;
 
       if (engine.buildingQueue.readyToPlace) {
-        elStatusBldg.textContent = `${CATALOG[engine.buildingQueue.itemType].name}: CLICK MAP TO PLACE`;
+        elStatusBldg.textContent = `${CATALOG[engine.buildingQueue.itemType].name}: CLICK MAP`;
         if (!wasBuildingReadyLastFrame) {
           isPlacementMode = true;
           wasBuildingReadyLastFrame = true;
@@ -668,36 +850,19 @@ async function bootstrap() {
       elProgBldg.style.width = '0%';
     }
 
-    // Infantry Queue Progress (Barracks)
-    if (engine.infantryQueue) {
-      btnCancelInfantry.style.display = 'inline-block';
+    if (engine.unitQueue) {
+      btnCancelUnit.style.display = 'inline-block';
       const pct = Math.floor(
-        (engine.infantryQueue.completedTicks / engine.infantryQueue.totalTicks) * 100
+        (engine.unitQueue.completedTicks / engine.unitQueue.totalTicks) * 100
       );
-      elProgInfantry.style.width = `${pct}%`;
-      elStatusInfantry.textContent = engine.infantryQueue.onHold
+      elProgUnit.style.width = `${pct}%`;
+      elStatusUnit.textContent = engine.unitQueue.onHold
         ? 'ON HOLD (NO FUNDS)'
-        : `${CATALOG[engine.infantryQueue.itemType].name} (${pct}%)`;
+        : `${CATALOG[engine.unitQueue.itemType].name} (${pct}%)`;
     } else {
-      btnCancelInfantry.style.display = 'none';
-      elStatusInfantry.textContent = 'Idle';
-      elProgInfantry.style.width = '0%';
-    }
-
-    // Vehicle Queue Progress (War Factory)
-    if (engine.vehicleQueue) {
-      btnCancelVehicle.style.display = 'inline-block';
-      const pct = Math.floor(
-        (engine.vehicleQueue.completedTicks / engine.vehicleQueue.totalTicks) * 100
-      );
-      elProgVehicle.style.width = `${pct}%`;
-      elStatusVehicle.textContent = engine.vehicleQueue.onHold
-        ? 'ON HOLD (NO FUNDS)'
-        : `${CATALOG[engine.vehicleQueue.itemType].name} (${pct}%)`;
-    } else {
-      btnCancelVehicle.style.display = 'none';
-      elStatusVehicle.textContent = 'Idle';
-      elProgVehicle.style.width = '0%';
+      btnCancelUnit.style.display = 'none';
+      elStatusUnit.textContent = 'Idle';
+      elProgUnit.style.width = '0%';
     }
   }
 
@@ -718,7 +883,7 @@ async function bootstrap() {
       accumulator -= GAME_CONFIG.TICK_MS;
     }
 
-    // Camera Panning
+    // Camera Panning via Arrow Keys or WASD (when not issuing hotkeys)
     if (keysPressed.has('w') || keysPressed.has('arrowup')) camera.y += camera.panSpeed;
     if (keysPressed.has('s') || keysPressed.has('arrowdown')) camera.y -= camera.panSpeed;
     if (keysPressed.has('a') || keysPressed.has('arrowleft')) camera.x += camera.panSpeed;
@@ -734,24 +899,36 @@ async function bootstrap() {
     const alpha = accumulator / GAME_CONFIG.TICK_MS;
     unitGraphics.clear();
 
-    if (moveOrderMarker) {
+    if (orderMarker) {
       unitGraphics
-        .circle(moveOrderMarker.x, moveOrderMarker.y, 14 * moveOrderMarker.alpha)
-        .stroke({ width: 2, color: 0x55ff77, alpha: moveOrderMarker.alpha });
-      moveOrderMarker.alpha -= 0.04;
-      if (moveOrderMarker.alpha <= 0) moveOrderMarker = null;
+        .circle(orderMarker.x, orderMarker.y, 15 * orderMarker.alpha)
+        .stroke({ width: 2, color: orderMarker.color, alpha: orderMarker.alpha });
+      orderMarker.alpha -= 0.04;
+      if (orderMarker.alpha <= 0) orderMarker = null;
     }
 
     let selectedCount = 0;
     let harvesterCount = 0;
+    let nodCount = 0;
+
     for (const unit of engine.units.values()) {
-      if (unit.selected) selectedCount++;
-      if (unit.type === 'HARVESTER') harvesterCount++;
+      if (unit.ownerId === 1) {
+        if (unit.selected) selectedCount++;
+        if (unit.type === 'HARVESTER') harvesterCount++;
+      } else {
+        nodCount++;
+      }
       const renderX = unit.prevX + (unit.x - unit.prevX) * alpha;
       const renderY = unit.prevY + (unit.y - unit.prevY) * alpha;
       drawUnit(unit, renderX, renderY);
     }
 
+    for (const b of engine.buildings.values()) {
+      if (b.ownerId !== 1) nodCount++;
+    }
+
+    drawProjectilesAndExplosions(alpha);
+    drawFogOfWar();
     drawPlacementPreview();
 
     uiOverlayGraphics.clear();
@@ -769,6 +946,7 @@ async function bootstrap() {
     elTick.textContent = String(engine.currentTick);
     elSelected.textContent = String(selectedCount);
     elHarvesters.textContent = String(harvesterCount);
+    elEnemies.textContent = nodCount > 0 ? String(nodCount) : 'SECTOR CLEAR (VICTORY!)';
     elCmd.textContent = engine.lastCommandText;
     syncSidebarUI();
   });

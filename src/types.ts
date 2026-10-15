@@ -1,11 +1,18 @@
-export type UnitType = 'LIGHT_INFANTRY' | 'MEDIUM_TANK' | 'HARVESTER' | 'MCV';
+export type UnitType =
+  | 'LIGHT_INFANTRY'
+  | 'ROCKET_SOLDIER'
+  | 'MEDIUM_TANK'
+  | 'HARVESTER'
+  | 'MCV';
 
 export type BuildingType =
   | 'CONSTRUCTION_YARD'
   | 'POWER_PLANT'
   | 'REFINERY'
   | 'BARRACKS'
-  | 'WAR_FACTORY';
+  | 'WAR_FACTORY'
+  | 'GUARD_TOWER'
+  | 'RADAR_DOME';
 
 export type HarvesterState =
   | 'IDLE'
@@ -14,10 +21,30 @@ export type HarvesterState =
   | 'MOVING_TO_REFINERY'
   | 'UNLOADING';
 
+export type ArmorType = 'NONE' | 'LIGHT' | 'HEAVY';
+export type WarheadType = 'SA' | 'AP' | 'HE';
+export type ProjectileStyle = 'BULLET' | 'SHELL' | 'ROCKET';
+
+// Classic C&C Armor vs. Warhead Multiplier Table
+export const DAMAGE_MATRIX: Record<WarheadType, Record<ArmorType, number>> = {
+  SA: { NONE: 1.0, LIGHT: 0.55, HEAVY: 0.25 }, // Small Arms: shreds infantry, weak vs tanks
+  AP: { NONE: 0.35, LIGHT: 0.85, HEAVY: 1.0 }, // Armor Piercing: shreds tanks & buildings
+  HE: { NONE: 0.9, LIGHT: 0.8, HEAVY: 0.65 },  // High Explosive: balanced splash
+};
+
+export interface WeaponSpec {
+  damage: number;
+  range: number; // World pixels
+  cooldownTicks: number; // Ticks between shots at 20Hz
+  warhead: WarheadType;
+  projectileSpeed: number; // World pixels per tick
+  projectileStyle: ProjectileStyle;
+}
+
 export interface UnitEntity {
   id: number;
   type: UnitType;
-  ownerId: number;
+  ownerId: number; // 1 = GDI (Player), 2 = Brotherhood of Nod (Enemy)
 
   // Current & previous tick coordinates for 60+ FPS interpolation
   x: number;
@@ -35,6 +62,8 @@ export interface UnitEntity {
 
   hp: number;
   maxHp: number;
+  armor: ArmorType;
+  sightRangeTiles: number;
   selected: boolean;
 
   // Phase 2 Harvester FSM fields
@@ -43,6 +72,14 @@ export interface UnitEntity {
   maxTiberiumLoad: number;
   stateTimer: number;
   targetRefineryId: number | null;
+
+  // Phase 3 Combat fields
+  weapon: WeaponSpec | null;
+  attackCooldown: number;
+  targetEntityId: number | null;
+  isAttackMove: boolean;
+  attackMoveDestX: number | null;
+  attackMoveDestY: number | null;
   stuckTicks?: number;
 }
 
@@ -56,13 +93,49 @@ export interface BuildingEntity {
   heightTiles: number;
   hp: number;
   maxHp: number;
+  armor: ArmorType;
+  sightRangeTiles: number;
   powerProduced: number;
   powerConsumed: number;
   selected: boolean;
+
+  // Phase 3 Defensive Turret fields (e.g. Guard Tower)
+  weapon: WeaponSpec | null;
+  attackCooldown: number;
+  targetEntityId: number | null;
+  turretAngle: number;
 }
 
+export interface ProjectileEntity {
+  id: number;
+  ownerId: number;
+  style: ProjectileStyle;
+  warhead: WarheadType;
+  damage: number;
+  x: number;
+  y: number;
+  prevX: number;
+  prevY: number;
+  targetX: number;
+  targetY: number;
+  targetEntityId: number | null;
+  speed: number;
+}
+
+export interface ExplosionEffect {
+  id: number;
+  x: number;
+  y: number;
+  maxRadius: number;
+  currentTick: number;
+  totalTicks: number;
+  color: number;
+}
+
+export type VisibilityState = 0 | 1 | 2; // 0 = Unexplored Shroud, 1 = Explored Fog, 2 = Visible
+
 export interface ProductionItem {
-  category: 'BUILDING' | 'INFANTRY' | 'VEHICLE';
+  category: 'BUILDING' | 'UNIT';
   itemType: BuildingType | UnitType;
   totalCost: number;
   paidCost: number;
@@ -74,7 +147,7 @@ export interface ProductionItem {
 
 export interface CatalogEntry {
   key: BuildingType | UnitType;
-  category: 'BUILDING' | 'INFANTRY' | 'VEHICLE';
+  category: 'BUILDING' | 'UNIT';
   name: string;
   cost: number;
   buildTicks: number;
@@ -84,6 +157,9 @@ export interface CatalogEntry {
   powerProduced?: number;
   powerConsumed?: number;
   maxHp: number;
+  armor: ArmorType;
+  sightRangeTiles: number;
+  weapon?: WeaponSpec;
 }
 
 export const CATALOG: Record<BuildingType | UnitType, CatalogEntry> = {
@@ -96,97 +172,188 @@ export const CATALOG: Record<BuildingType | UnitType, CatalogEntry> = {
     prerequisites: [],
     widthTiles: 3,
     heightTiles: 3,
-    powerProduced: 25,
+    powerProduced: 30,
     powerConsumed: 0,
     maxHp: 1500,
+    armor: 'HEAVY',
+    sightRangeTiles: 7,
   },
   POWER_PLANT: {
     key: 'POWER_PLANT',
     category: 'BUILDING',
     name: 'Power Plant',
     cost: 300,
-    buildTicks: 60, // 3 seconds at 20Hz
+    buildTicks: 50,
     prerequisites: ['CONSTRUCTION_YARD'],
     widthTiles: 2,
     heightTiles: 2,
     powerProduced: 100,
     powerConsumed: 0,
     maxHp: 600,
+    armor: 'LIGHT',
+    sightRangeTiles: 5,
   },
   REFINERY: {
     key: 'REFINERY',
     category: 'BUILDING',
     name: 'Refinery',
     cost: 1500,
-    buildTicks: 120, // 6 seconds at 20Hz
+    buildTicks: 100,
     prerequisites: ['CONSTRUCTION_YARD', 'POWER_PLANT'],
     widthTiles: 3,
     heightTiles: 2,
     powerProduced: 0,
     powerConsumed: 40,
     maxHp: 1000,
+    armor: 'LIGHT',
+    sightRangeTiles: 6,
   },
   BARRACKS: {
     key: 'BARRACKS',
     category: 'BUILDING',
     name: 'GDI Barracks',
     cost: 400,
-    buildTicks: 70,
+    buildTicks: 60,
     prerequisites: ['CONSTRUCTION_YARD', 'POWER_PLANT'],
     widthTiles: 2,
     heightTiles: 2,
     powerProduced: 0,
     powerConsumed: 20,
     maxHp: 800,
+    armor: 'LIGHT',
+    sightRangeTiles: 5,
   },
   WAR_FACTORY: {
     key: 'WAR_FACTORY',
     category: 'BUILDING',
     name: 'War Factory',
     cost: 2000,
-    buildTicks: 140,
+    buildTicks: 120,
     prerequisites: ['CONSTRUCTION_YARD', 'REFINERY'],
     widthTiles: 3,
     heightTiles: 2,
     powerProduced: 0,
     powerConsumed: 50,
     maxHp: 1200,
+    armor: 'HEAVY',
+    sightRangeTiles: 6,
+  },
+  GUARD_TOWER: {
+    key: 'GUARD_TOWER',
+    category: 'BUILDING',
+    name: 'Guard Tower',
+    cost: 500,
+    buildTicks: 65,
+    prerequisites: ['CONSTRUCTION_YARD', 'BARRACKS'],
+    widthTiles: 1,
+    heightTiles: 1,
+    powerProduced: 0,
+    powerConsumed: 25,
+    maxHp: 650,
+    armor: 'HEAVY',
+    sightRangeTiles: 7,
+    weapon: {
+      damage: 24,
+      range: 250,
+      cooldownTicks: 9,
+      warhead: 'SA',
+      projectileSpeed: 26,
+      projectileStyle: 'BULLET',
+    },
+  },
+  RADAR_DOME: {
+    key: 'RADAR_DOME',
+    category: 'BUILDING',
+    name: 'Radar Dome',
+    cost: 1000,
+    buildTicks: 90,
+    prerequisites: ['CONSTRUCTION_YARD', 'REFINERY'],
+    widthTiles: 2,
+    heightTiles: 2,
+    powerProduced: 0,
+    powerConsumed: 45,
+    maxHp: 900,
+    armor: 'LIGHT',
+    sightRangeTiles: 10,
   },
   LIGHT_INFANTRY: {
     key: 'LIGHT_INFANTRY',
-    category: 'INFANTRY',
+    category: 'UNIT',
     name: 'Minigunner',
     cost: 100,
-    buildTicks: 40,
+    buildTicks: 35,
     prerequisites: ['BARRACKS'],
-    maxHp: 50,
+    maxHp: 60,
+    armor: 'NONE',
+    sightRangeTiles: 5,
+    weapon: {
+      damage: 14,
+      range: 150,
+      cooldownTicks: 10,
+      warhead: 'SA',
+      projectileSpeed: 24,
+      projectileStyle: 'BULLET',
+    },
+  },
+  ROCKET_SOLDIER: {
+    key: 'ROCKET_SOLDIER',
+    category: 'UNIT',
+    name: 'Rocket Inf.',
+    cost: 300,
+    buildTicks: 55,
+    prerequisites: ['BARRACKS', 'RADAR_DOME'],
+    maxHp: 55,
+    armor: 'NONE',
+    sightRangeTiles: 6,
+    weapon: {
+      damage: 55,
+      range: 230,
+      cooldownTicks: 24,
+      warhead: 'AP',
+      projectileSpeed: 16,
+      projectileStyle: 'ROCKET',
+    },
   },
   MEDIUM_TANK: {
     key: 'MEDIUM_TANK',
-    category: 'VEHICLE',
+    category: 'UNIT',
     name: 'Medium Tank',
     cost: 800,
-    buildTicks: 90,
+    buildTicks: 85,
     prerequisites: ['WAR_FACTORY'],
-    maxHp: 400,
+    maxHp: 420,
+    armor: 'HEAVY',
+    sightRangeTiles: 6,
+    weapon: {
+      damage: 70,
+      range: 220,
+      cooldownTicks: 22,
+      warhead: 'AP',
+      projectileSpeed: 20,
+      projectileStyle: 'SHELL',
+    },
   },
   HARVESTER: {
     key: 'HARVESTER',
-    category: 'VEHICLE',
+    category: 'UNIT',
     name: 'Harvester',
     cost: 1200,
-    buildTicks: 110,
+    buildTicks: 100,
     prerequisites: ['WAR_FACTORY', 'REFINERY'],
     maxHp: 600,
+    armor: 'LIGHT',
+    sightRangeTiles: 5,
   },
   MCV: {
     key: 'MCV',
-    category: 'VEHICLE',
+    category: 'UNIT',
     name: 'M.C.V.',
     cost: 2500,
-    buildTicks: 150,
+    buildTicks: 140,
     prerequisites: ['WAR_FACTORY'],
     maxHp: 800,
+    armor: 'LIGHT',
+    sightRangeTiles: 6,
   },
 };
 
@@ -194,6 +361,21 @@ export const CATALOG: Record<BuildingType | UnitType, CatalogEntry> = {
 export interface MoveCommand {
   tick: number;
   type: 'MOVE';
+  unitIds: number[];
+  targetX: number;
+  targetY: number;
+}
+
+export interface AttackCommand {
+  tick: number;
+  type: 'ATTACK';
+  unitIds: number[];
+  targetEntityId: number;
+}
+
+export interface AttackMoveCommand {
+  tick: number;
+  type: 'ATTACK_MOVE';
   unitIds: number[];
   targetX: number;
   targetY: number;
@@ -214,7 +396,7 @@ export interface StartProductionCommand {
 export interface CancelProductionCommand {
   tick: number;
   type: 'CANCEL_PRODUCTION';
-  category: 'BUILDING' | 'INFANTRY' | 'VEHICLE' | 'UNIT';
+  category: 'BUILDING' | 'UNIT';
 }
 
 export interface PlaceBuildingCommand {
@@ -235,24 +417,18 @@ export interface DirectHarvesterCommand {
 
 export type GameCommand =
   | MoveCommand
+  | AttackCommand
+  | AttackMoveCommand
   | DeployMcvCommand
   | StartProductionCommand
   | CancelProductionCommand
   | PlaceBuildingCommand
   | DirectHarvesterCommand;
 
-export type CommandPayload =
-  | Omit<MoveCommand, 'tick'>
-  | Omit<DeployMcvCommand, 'tick'>
-  | Omit<StartProductionCommand, 'tick'>
-  | Omit<CancelProductionCommand, 'tick'>
-  | Omit<PlaceBuildingCommand, 'tick'>
-  | Omit<DirectHarvesterCommand, 'tick'>;
-
 export interface TiberiumPatch {
   gridX: number;
   gridY: number;
-  amount: number; // Max 100 per tile
+  amount: number;
 }
 
 export const GAME_CONFIG = {
@@ -261,5 +437,8 @@ export const GAME_CONFIG = {
   TILE_SIZE: 48,
   MAP_COLS: 40,
   MAP_ROWS: 40,
-  BASE_ADJACENCY_TILES: 7, // Max tile distance from existing friendly building
+  BASE_ADJACENCY_TILES: 7,
 };
+
+type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;
+export type CommandPayload = DistributiveOmit<GameCommand, 'tick'>;
