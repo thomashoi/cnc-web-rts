@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Command & Conquer: Web RTS (Phase 1 Engine)</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background: #0d0f0d;
+      color: #c8ffd0;
+      font-family: 'Courier New', Courier, monospace;
+      overflow: hidden;
+      display: flex;
+      height: 100vh;
+      width: 100vw;
+    }
+    #viewport {
+      position: relative;
+      flex: 1;
+      height: 100%;
+      overflow: hidden;
+      cursor: crosshair;
+    }
+    #hud-top {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(10, 18, 12, 0.85);
+      border: 1px solid #2e6f40;
+      padding: 8px 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #sidebar {
+      width: 240px;
+      height: 100%;
+      background: #181c18;
+      border-left: 3px solid #3a4a3c;
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      gap: 12px;
+      z-index: 20;
+    }
+    .panel-box {
+      background: #0e120e;
+      border: 1px solid #2e4a31;
+      padding: 10px;
+    }
+    .credits-display {
+      font-size: 20px;
+      font-weight: bold;
+      color: #55ff77;
+      text-align: right;
+      letter-spacing: 1px;
+    }
+    .label {
+      font-size: 11px;
+      color: #7a9a7e;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .radar-placeholder {
+      height: 160px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #2e6f40;
+      font-size: 12px;
+      border: 1px dashed #2e6f40;
+      background: radial-gradient(circle, #112214 0%, #070a07 100%);
+    }
+    .controls-guide {
+      font-size: 11px;
+      color: #9ab89e;
+      line-height: 1.6;
+    }
+    .controls-guide strong {
+      color: #55ff77;
+    }
+  </style>
+</head>
+<body>
+  <div id="viewport">
+    <div id="hud-top">
+      <div><strong>SIM TICK:</strong> <span id="stat-tick">0</span> (20 Hz Fixed)</div>
+      <div><strong>SELECTED:</strong> <span id="stat-selected">0</span> units</div>
+      <div><strong>LAST CMD:</strong> <span id="stat-cmd">None</span></div>
+    </div>
+  </div>
+
+  <aside id="sidebar">
+    <div class="panel-box">
+      <div class="label">EVA Credits</div>
+      <div class="credits-display" id="stat-credits">$ 5,000</div>
+    </div>
+
+    <div class="panel-box">
+      <div class="label">Tactical Radar</div>
+      <div class="radar-placeholder">[ RADAR ONLINE - PHASE 1 ]</div>
+    </div>
+
+    <div class="panel-box" style="flex: 1;">
+      <div class="label">Phase 1 Controls</div>
+      <div class="controls-guide">
+        • <strong>Left Click / Drag:</strong> Select units<br/>
+        • <strong>Shift + Click:</strong> Add to selection<br/>
+        • <strong>Right Click:</strong> Issue Move Command<br/>
+        • <strong>WASD / Arrows:</strong> Pan camera<br/>
+        • <strong>Middle Mouse Drag:</strong> Pan camera<br/>
+        • <strong>Mouse Wheel:</strong> Zoom in/out<br/>
+        • <strong>Ctrl + 1..9:</strong> Save group<br/>
+        • <strong>1..9:</strong> Recall group
+      </div>
+    </div>
+  </aside>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
