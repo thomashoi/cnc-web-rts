@@ -642,53 +642,186 @@ export class GameEngine {
 
   private updateUnitsMovement(): void {
     const unitList = Array.from(this.units.values());
+    const { TILE_SIZE } = GAME_CONFIG;
 
+    // 1. Calculate intended movement with obstacle avoidance
     for (const unit of unitList) {
-      if (unit.targetX !== null && unit.targetY !== null) {
-        const dx = unit.targetX - unit.x;
-        const dy = unit.targetY - unit.y;
-        const dist = Math.hypot(dx, dy);
+      if (unit.targetX === null || unit.targetY === null) continue;
 
-        if (dist <= unit.speed) {
-          unit.x = unit.targetX;
-          unit.y = unit.targetY;
+      const toTargetX = unit.targetX - unit.x;
+      const toTargetY = unit.targetY - unit.y;
+      const distToTarget = Math.hypot(toTargetX, toTargetY);
+
+      if (distToTarget <= unit.speed) {
+        unit.x = unit.targetX;
+        unit.y = unit.targetY;
+        unit.targetX = null;
+        unit.targetY = null;
+        continue;
+      }
+
+      // Check if target position is blocked by a stationary unit
+      let destinationBlocked = false;
+      for (const other of unitList) {
+        if (other.id === unit.id) continue;
+        const otherIsStationary = other.targetX === null && other.targetY === null;
+        if (!otherIsStationary) continue;
+
+        const targetDistToOther = Math.hypot(other.x - unit.targetX, other.y - unit.targetY);
+        const distToOther = Math.hypot(other.x - unit.x, other.y - unit.y);
+
+        // If destination is within other unit's radius and we are touching distance:
+        if (targetDistToOther <= other.radius + 6 && distToOther <= unit.radius + other.radius + 8) {
           unit.targetX = null;
           unit.targetY = null;
-        } else {
-          const dirX = dx / dist;
-          const dirY = dy / dist;
-          unit.x += dirX * unit.speed;
-          unit.y += dirY * unit.speed;
-          unit.hullAngle = Math.atan2(dy, dx);
-          unit.turretAngle = unit.hullAngle;
+          destinationBlocked = true;
+          break;
         }
       }
-    }
+      if (destinationBlocked) continue;
 
-    // Unit-to-Unit separation
-    for (let i = 0; i < unitList.length; i++) {
-      for (let j = i + 1; j < unitList.length; j++) {
-        const a = unitList[i];
-        const b = unitList[j];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
+      const dirX = toTargetX / distToTarget;
+      const dirY = toTargetY / distToTarget;
+
+      // Dynamic local avoidance: steer around stationary units and buildings in the forward path
+      let avoidX = 0;
+      let avoidY = 0;
+      const lookAhead = unit.speed * 5 + unit.radius + 10;
+
+      for (const other of unitList) {
+        if (other.id === unit.id) continue;
+
+        const otherIsStationary = other.targetX === null && other.targetY === null;
+        const dx = other.x - unit.x;
+        const dy = other.y - unit.y;
         const dist = Math.hypot(dx, dy);
-        const minDist = a.radius + b.radius + 4;
+        const combinedRadius = unit.radius + other.radius + 6;
 
-        if (dist > 0 && dist < minDist) {
-          const overlap = (minDist - dist) * 0.35;
-          const nx = dx / dist;
-          const ny = dy / dist;
-          a.x = this.clampToWorld(a.x - nx * overlap, true);
-          a.y = this.clampToWorld(a.y - ny * overlap, false);
-          b.x = this.clampToWorld(b.x + nx * overlap, true);
-          b.y = this.clampToWorld(b.y + ny * overlap, false);
+        if (dist > lookAhead + other.radius || dist < 0.001) continue;
+
+        // Project onto forward movement vector
+        const forwardDist = dx * dirX + dy * dirY;
+        if (forwardDist < -unit.radius * 0.5) continue; // Behind unit
+
+        // Perpendicular distance to the forward ray
+        const perpDist = Math.abs(dx * (-dirY) + dy * dirX);
+
+        if (perpDist < combinedRadius) {
+          const side = dx * (-dirY) + dy * dirX;
+          let steerSign = side >= 0 ? -1 : 1;
+          if (Math.abs(side) < 0.5) {
+            steerSign = unit.id < other.id ? -1 : 1;
+          }
+
+          // Stationary obstacles produce stronger avoidance so moving units route around them
+          const stationaryMult = otherIsStationary ? 2.2 : 1.0;
+          const closeness = 1 - Math.max(0, forwardDist) / (lookAhead + other.radius);
+          const lateral = 1 - perpDist / combinedRadius;
+          const force = closeness * lateral * 1.8 * stationaryMult;
+
+          avoidX += -dirY * steerSign * force;
+          avoidY += dirX * steerSign * force;
+        }
+      }
+
+      // Avoid solid building footprints
+      for (const b of this.buildings.values()) {
+        const bCenterX = (b.gridX + b.widthTiles / 2) * TILE_SIZE;
+        const bCenterY = (b.gridY + b.heightTiles / 2) * TILE_SIZE;
+        const bRadius = (Math.max(b.widthTiles, b.heightTiles) * TILE_SIZE) / 2;
+
+        const dx = bCenterX - unit.x;
+        const dy = bCenterY - unit.y;
+        const dist = Math.hypot(dx, dy);
+        const combinedRadius = unit.radius + bRadius + 6;
+
+        if (dist > lookAhead + bRadius || dist < 0.001) continue;
+
+        const forwardDist = dx * dirX + dy * dirY;
+        if (forwardDist < -unit.radius) continue;
+
+        const perpDist = Math.abs(dx * (-dirY) + dy * dirX);
+        if (perpDist < combinedRadius) {
+          const side = dx * (-dirY) + dy * dirX;
+          const steerSign = side >= 0 ? -1 : 1;
+          const closeness = 1 - Math.max(0, forwardDist) / (lookAhead + bRadius);
+          const lateral = 1 - perpDist / combinedRadius;
+          const force = closeness * lateral * 2.0;
+
+          avoidX += -dirY * steerSign * force;
+          avoidY += dirX * steerSign * force;
+        }
+      }
+
+      // Combine forward path and avoidance steering
+      let moveDirX = dirX + avoidX;
+      let moveDirY = dirY + avoidY;
+      const mag = Math.hypot(moveDirX, moveDirY);
+      if (mag > 0.001) {
+        moveDirX /= mag;
+        moveDirY /= mag;
+      } else {
+        moveDirX = dirX;
+        moveDirY = dirY;
+      }
+
+      const stepX = moveDirX * unit.speed;
+      const stepY = moveDirY * unit.speed;
+
+      unit.x = this.clampToWorld(unit.x + stepX, true);
+      unit.y = this.clampToWorld(unit.y + stepY, false);
+      unit.hullAngle = Math.atan2(moveDirY, moveDirX);
+      unit.turretAngle = unit.hullAngle;
+    }
+
+    // 2. Unit-to-Unit separation: STRICTLY protect stationary units from being displaced
+    for (let iter = 0; iter < 2; iter++) {
+      for (let i = 0; i < unitList.length; i++) {
+        for (let j = i + 1; j < unitList.length; j++) {
+          const a = unitList[i];
+          const b = unitList[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.hypot(dx, dy);
+          const minDist = a.radius + b.radius + 3;
+
+          if (dist > 0 && dist < minDist) {
+            const overlap = (minDist - dist) * 0.5;
+            const nx = dx / dist;
+            const ny = dy / dist;
+
+            const aMoving = a.targetX !== null && a.targetY !== null;
+            const bMoving = b.targetX !== null && b.targetY !== null;
+
+            if (aMoving && !bMoving) {
+              // Stationary unit B remains completely fixed! Only moving unit A is pushed away.
+              a.x = this.clampToWorld(a.x - nx * overlap * 2.0, true);
+              a.y = this.clampToWorld(a.y - ny * overlap * 2.0, false);
+            } else if (!aMoving && bMoving) {
+              // Stationary unit A remains completely fixed! Only moving unit B is pushed away.
+              b.x = this.clampToWorld(b.x + nx * overlap * 2.0, true);
+              b.y = this.clampToWorld(b.y + ny * overlap * 2.0, false);
+            } else if (aMoving && bMoving) {
+              // Both units are moving: distribute displacement equally
+              a.x = this.clampToWorld(a.x - nx * overlap, true);
+              a.y = this.clampToWorld(a.y - ny * overlap, false);
+              b.x = this.clampToWorld(b.x + nx * overlap, true);
+              b.y = this.clampToWorld(b.y + ny * overlap, false);
+            } else {
+              // Both are stationary: only separate if heavily overlapping
+              if (overlap > 1.5) {
+                a.x = this.clampToWorld(a.x - nx * overlap * 0.5, true);
+                a.y = this.clampToWorld(a.y - ny * overlap * 0.5, false);
+                b.x = this.clampToWorld(b.x + nx * overlap * 0.5, true);
+                b.y = this.clampToWorld(b.y + ny * overlap * 0.5, false);
+              }
+            }
+          }
         }
       }
     }
 
-    // Push units outside of solid building footprints
-    const { TILE_SIZE } = GAME_CONFIG;
+    // 3. Push units outside of solid building footprints
     for (const unit of unitList) {
       for (const b of this.buildings.values()) {
         const left = b.gridX * TILE_SIZE;
@@ -704,11 +837,24 @@ export class GameEngine {
 
         if (dist < unit.radius) {
           if (dist === 0) {
-            unit.y = bottom + unit.radius + 2;
+            unit.y = this.clampToWorld(bottom + unit.radius + 2, false);
           } else {
             const push = unit.radius - dist + 1;
-            unit.x += (dx / dist) * push;
-            unit.y += (dy / dist) * push;
+            unit.x = this.clampToWorld(unit.x + (dx / dist) * push, true);
+            unit.y = this.clampToWorld(unit.y + (dy / dist) * push, false);
+          }
+
+          // If unit's destination was inside or directly at this building wall, clear target
+          if (unit.targetX !== null && unit.targetY !== null) {
+            if (
+              unit.targetX >= left - 6 &&
+              unit.targetX <= right + 6 &&
+              unit.targetY >= top - 6 &&
+              unit.targetY <= bottom + 6
+            ) {
+              unit.targetX = null;
+              unit.targetY = null;
+            }
           }
         }
       }
