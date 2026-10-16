@@ -1,6 +1,8 @@
-import { Application, Container, Graphics } from 'pixi.js';
+import { Application, Container, Graphics, Sprite } from 'pixi.js';
 import { AudioSystem } from './AudioSystem';
 import { GameEngine } from './GameEngine';
+import { SpriteFactory } from './SpriteFactory';
+import { VfxSystem } from './VfxSystem';
 import {
   BuildingType,
   CATALOG,
@@ -8,6 +10,18 @@ import {
   UnitEntity,
   UnitType,
 } from './types';
+
+interface UnitRig {
+  container: Container;
+  hull: Sprite;
+  turret: Sprite | null;
+}
+
+interface BuildingRig {
+  container: Container;
+  base: Sprite;
+  addon: Sprite | null;
+}
 
 async function bootstrap() {
   const viewport = document.getElementById('viewport')!;
@@ -24,29 +38,56 @@ async function bootstrap() {
   viewport.appendChild(app.canvas);
   app.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
+  const sprites = new SpriteFactory();
+  await sprites.init();
+
   const engine = new GameEngine();
   const audio = new AudioSystem();
+  const vfx = new VfxSystem(sprites);
 
-  // Scene Graph Layers
+  // Scene Graph Hierarchy
   const worldContainer = new Container();
-  const terrainGraphics = new Graphics();
-  const tiberiumGraphics = new Graphics();
-  const buildingGraphics = new Graphics();
-  const unitGraphics = new Graphics();
+  const terrainContainer = new Container();
+  const crystalContainer = new Container();
+  const buildingSpriteLayer = new Container();
+  const unitSpriteLayer = new Container();
+  const tacticalHudGraphics = new Graphics(); // Selection brackets, health bars, lasers
   const projectileGraphics = new Graphics();
-  const fogGraphics = new Graphics();
   const placementGraphics = new Graphics();
   const uiOverlayGraphics = new Graphics();
 
-  worldContainer.addChild(terrainGraphics);
-  worldContainer.addChild(tiberiumGraphics);
-  worldContainer.addChild(buildingGraphics);
-  worldContainer.addChild(unitGraphics);
+  worldContainer.addChild(terrainContainer);
+  worldContainer.addChild(vfx.decalContainer);
+  worldContainer.addChild(crystalContainer);
+  worldContainer.addChild(buildingSpriteLayer);
+  worldContainer.addChild(unitSpriteLayer);
+  worldContainer.addChild(vfx.smokeContainer);
+  worldContainer.addChild(tacticalHudGraphics);
   worldContainer.addChild(projectileGraphics);
-  worldContainer.addChild(fogGraphics);
+  worldContainer.addChild(vfx.fogSprite);
   worldContainer.addChild(placementGraphics);
   app.stage.addChild(worldContainer);
   app.stage.addChild(uiOverlayGraphics);
+
+  // Persistent Sprite Rigs
+  const unitRigs: Map<number, UnitRig> = new Map();
+  const buildingRigs: Map<number, BuildingRig> = new Map();
+  const crystalSprites: Map<string, Sprite> = new Map();
+
+  // Build Textured Terrain Tile Map
+  function buildTerrainTileSprites(): void {
+    const { MAP_COLS, MAP_ROWS, TILE_SIZE } = GAME_CONFIG;
+    for (let r = 0; r < MAP_ROWS; r++) {
+      for (let c = 0; c < MAP_COLS; c++) {
+        const variantIdx = (c * 17 + r * 31) % sprites.terrainTiles.length;
+        const tileSprite = new Sprite(sprites.terrainTiles[variantIdx]);
+        tileSprite.x = c * TILE_SIZE;
+        tileSprite.y = r * TILE_SIZE;
+        terrainContainer.addChild(tileSprite);
+      }
+    }
+  }
+  buildTerrainTileSprites();
 
   // Camera & Interaction State
   const camera = {
@@ -75,29 +116,6 @@ async function bootstrap() {
   const controlGroups: Map<string, number[]> = new Map();
   const keysPressed: Set<string> = new Set();
 
-  function drawStaticGrid(): void {
-    terrainGraphics.clear();
-    const { MAP_COLS, MAP_ROWS, TILE_SIZE } = GAME_CONFIG;
-    const totalW = MAP_COLS * TILE_SIZE;
-    const totalH = MAP_ROWS * TILE_SIZE;
-
-    terrainGraphics.rect(0, 0, totalW, totalH).fill({ color: 0x1e241b });
-
-    for (let c = 0; c <= MAP_COLS; c++) {
-      terrainGraphics
-        .moveTo(c * TILE_SIZE, 0)
-        .lineTo(c * TILE_SIZE, totalH)
-        .stroke({ width: 1, color: 0x283024, alpha: 0.7 });
-    }
-    for (let r = 0; r <= MAP_ROWS; r++) {
-      terrainGraphics
-        .moveTo(0, r * TILE_SIZE)
-        .lineTo(totalW, r * TILE_SIZE)
-        .stroke({ width: 1, color: 0x283024, alpha: 0.7 });
-    }
-  }
-  drawStaticGrid();
-
   function screenToWorld(screenX: number, screenY: number): { x: number; y: number } {
     return {
       x: (screenX - camera.x) / camera.zoom,
@@ -106,7 +124,7 @@ async function bootstrap() {
   }
 
   // ============================================================================
-  // INTERACTIVE RADAR MINIMAP SETUP
+  // INTERACTIVE RADAR MINIMAP
   // ============================================================================
   const radarCanvas = document.getElementById('radar-canvas') as HTMLCanvasElement;
   const radarCtx = radarCanvas.getContext('2d')!;
@@ -119,14 +137,11 @@ async function bootstrap() {
     const rect = radarCanvas.getBoundingClientRect();
     const rx = (clientX - rect.left) / rect.width;
     const ry = (clientY - rect.top) / rect.height;
-
     const worldW = GAME_CONFIG.MAP_COLS * GAME_CONFIG.TILE_SIZE;
     const worldH = GAME_CONFIG.MAP_ROWS * GAME_CONFIG.TILE_SIZE;
-    const targetWorldX = rx * worldW;
-    const targetWorldY = ry * worldH;
 
-    camera.x = app.screen.width / 2 - targetWorldX * camera.zoom;
-    camera.y = app.screen.height / 2 - targetWorldY * camera.zoom;
+    camera.x = app.screen.width / 2 - rx * worldW * camera.zoom;
+    camera.y = app.screen.height / 2 - ry * worldH * camera.zoom;
   }
 
   radarCanvas.addEventListener('pointerdown', (e: PointerEvent) => {
@@ -134,14 +149,9 @@ async function bootstrap() {
       isDraggingRadar = true;
       jumpCameraToRadarPoint(e.clientX, e.clientY);
     } else if (e.button === 2) {
-      // Right-click on Minimap issues MOVE / ATTACK_MOVE to selected units
       const rect = radarCanvas.getBoundingClientRect();
-      const rx = (e.clientX - rect.left) / rect.width;
-      const ry = (e.clientY - rect.top) / rect.height;
-      const worldW = GAME_CONFIG.MAP_COLS * GAME_CONFIG.TILE_SIZE;
-      const worldH = GAME_CONFIG.MAP_ROWS * GAME_CONFIG.TILE_SIZE;
-      const wx = rx * worldW;
-      const wy = ry * worldH;
+      const wx = ((e.clientX - rect.left) / rect.width) * GAME_CONFIG.MAP_COLS * GAME_CONFIG.TILE_SIZE;
+      const wy = ((e.clientY - rect.top) / rect.height) * GAME_CONFIG.MAP_ROWS * GAME_CONFIG.TILE_SIZE;
 
       const selectedIds = Array.from(engine.units.values())
         .filter((u) => u.ownerId === 1 && u.selected)
@@ -154,21 +164,14 @@ async function bootstrap() {
           targetX: wx,
           targetY: wy,
         });
-        orderMarker = {
-          x: wx,
-          y: wy,
-          alpha: 1.0,
-          color: isAttackMoveMode ? 0xff4444 : 0x55ff77,
-        };
+        orderMarker = { x: wx, y: wy, alpha: 1.0, color: isAttackMoveMode ? 0xff4444 : 0x55ff77 };
         isAttackMoveMode = false;
       }
     }
   });
 
   window.addEventListener('pointermove', (e: PointerEvent) => {
-    if (isDraggingRadar) {
-      jumpCameraToRadarPoint(e.clientX, e.clientY);
-    }
+    if (isDraggingRadar) jumpCameraToRadarPoint(e.clientX, e.clientY);
   });
 
   window.addEventListener('pointerup', () => {
@@ -186,26 +189,18 @@ async function bootstrap() {
     radarStatusTag.textContent = hasRadarSweep ? 'DOME SWEEP ACTIVE' : 'LOCAL SENSORS';
     radarStatusTag.style.color = hasRadarSweep ? '#55ff77' : '#ffdd44';
 
-    // 1. Base background
     radarCtx.fillStyle = '#121812';
     radarCtx.fillRect(0, 0, cw, ch);
 
-    // 2. Terrain & Fog of War tiles
     for (let r = 0; r < MAP_ROWS; r++) {
       for (let c = 0; c < MAP_COLS; c++) {
         const vis = engine.fogEnabled ? engine.fogGrid[r][c] : 2;
-        if (vis === 0 && !hasRadarSweep) {
-          radarCtx.fillStyle = '#040604';
-        } else if (vis === 1) {
-          radarCtx.fillStyle = '#141a13';
-        } else {
-          radarCtx.fillStyle = '#222b1f';
-        }
+        radarCtx.fillStyle =
+          vis === 0 && !hasRadarSweep ? '#040604' : vis === 1 ? '#141a13' : '#222b1f';
         radarCtx.fillRect(c * tileW, r * tileH, tileW + 0.5, tileH + 0.5);
       }
     }
 
-    // 3. Tiberium patches
     radarCtx.fillStyle = '#2ee65f';
     for (const p of engine.tiberiumPatches) {
       if (p.amount <= 0) continue;
@@ -213,55 +208,34 @@ async function bootstrap() {
       radarCtx.fillRect(p.gridX * tileW, p.gridY * tileH, tileW, tileH);
     }
 
-    // 4. Structures
     for (const b of engine.buildings.values()) {
-      if (
-        b.ownerId !== 1 &&
-        engine.fogEnabled &&
-        engine.fogGrid[b.gridY][b.gridX] === 0 &&
-        !hasRadarSweep
-      ) {
+      if (b.ownerId !== 1 && engine.fogEnabled && engine.fogGrid[b.gridY][b.gridX] === 0 && !hasRadarSweep) {
         continue;
       }
       radarCtx.fillStyle = b.ownerId === 1 ? '#e6c34a' : '#ff3b3b';
-      radarCtx.fillRect(
-        b.gridX * tileW,
-        b.gridY * tileH,
-        b.widthTiles * tileW,
-        b.heightTiles * tileH
-      );
+      radarCtx.fillRect(b.gridX * tileW, b.gridY * tileH, b.widthTiles * tileW, b.heightTiles * tileH);
     }
 
-    // 5. Mobile Units
     const worldW = MAP_COLS * TILE_SIZE;
     const worldH = MAP_ROWS * TILE_SIZE;
     for (const u of engine.units.values()) {
-      if (
-        u.ownerId !== 1 &&
-        !engine.isWorldPosVisibleToPlayer(u.x, u.y) &&
-        !hasRadarSweep
-      ) {
-        continue;
-      }
+      if (u.ownerId !== 1 && !engine.isWorldPosVisibleToPlayer(u.x, u.y) && !hasRadarSweep) continue;
       radarCtx.fillStyle = u.ownerId === 1 ? '#55ff77' : '#ff4444';
-      const ux = (u.x / worldW) * cw;
-      const uy = (u.y / worldH) * ch;
-      radarCtx.fillRect(ux - 1.5, uy - 1.5, 3, 3);
+      radarCtx.fillRect((u.x / worldW) * cw - 1.5, (u.y / worldH) * ch - 1.5, 3, 3);
     }
-
-    // 6. Camera Viewport Box
-    const camLeft = (-camera.x / camera.zoom / worldW) * cw;
-    const camTop = (-camera.y / camera.zoom / worldH) * ch;
-    const camW = (app.screen.width / camera.zoom / worldW) * cw;
-    const camH = (app.screen.height / camera.zoom / worldH) * ch;
 
     radarCtx.strokeStyle = '#ffffff';
     radarCtx.lineWidth = 1.2;
-    radarCtx.strokeRect(camLeft, camTop, camW, camH);
+    radarCtx.strokeRect(
+      (-camera.x / camera.zoom / worldW) * cw,
+      (-camera.y / camera.zoom / worldH) * ch,
+      (app.screen.width / camera.zoom / worldW) * cw,
+      (app.screen.height / camera.zoom / worldH) * ch
+    );
   }
 
   // ============================================================================
-  // SIDEBAR UI INITIALIZATION
+  // SIDEBAR UI & INPUT HANDLERS
   // ============================================================================
   const structureTypes: BuildingType[] = [
     'POWER_PLANT',
@@ -295,53 +269,40 @@ async function bootstrap() {
 
   const cardElements: Map<BuildingType | UnitType, HTMLDivElement> = new Map();
 
-  function createSidebarCards(): void {
-    for (const bKey of structureTypes) {
-      const entry = CATALOG[bKey];
-      const card = document.createElement('div');
-      card.className = 'build-card';
-      card.innerHTML = `
-        <div class="build-title">${entry.name}</div>
-        <div class="build-cost">$${entry.cost}</div>
-        <div class="build-req" id="req-${bKey}"></div>
-      `;
-      card.addEventListener('click', () => {
-        if (engine.buildingQueue?.readyToPlace && engine.buildingQueue.itemType === bKey) {
-          isPlacementMode = true;
-          isAttackMoveMode = false;
-          return;
-        }
-        engine.issueCommand({ type: 'START_PRODUCTION', itemType: bKey });
-      });
-      gridStructuresEl.appendChild(card);
-      cardElements.set(bKey, card);
-    }
-
-    for (const uKey of unitTypes) {
-      const entry = CATALOG[uKey];
-      const card = document.createElement('div');
-      card.className = 'build-card';
-      card.innerHTML = `
-        <div class="build-title">${entry.name}</div>
-        <div class="build-cost">$${entry.cost}</div>
-        <div class="build-req" id="req-${uKey}"></div>
-      `;
-      card.addEventListener('click', () => {
-        engine.issueCommand({ type: 'START_PRODUCTION', itemType: uKey });
-      });
-      gridUnitsEl.appendChild(card);
-      cardElements.set(uKey, card);
-    }
+  for (const bKey of structureTypes) {
+    const entry = CATALOG[bKey];
+    const card = document.createElement('div');
+    card.className = 'build-card';
+    card.innerHTML = `<div class="build-title">${entry.name}</div><div class="build-cost">$${entry.cost}</div><div class="build-req" id="req-${bKey}"></div>`;
+    card.addEventListener('click', () => {
+      if (engine.buildingQueue?.readyToPlace && engine.buildingQueue.itemType === bKey) {
+        isPlacementMode = true;
+        isAttackMoveMode = false;
+        return;
+      }
+      engine.issueCommand({ type: 'START_PRODUCTION', itemType: bKey });
+    });
+    gridStructuresEl.appendChild(card);
+    cardElements.set(bKey, card);
   }
-  createSidebarCards();
+
+  for (const uKey of unitTypes) {
+    const entry = CATALOG[uKey];
+    const card = document.createElement('div');
+    card.className = 'build-card';
+    card.innerHTML = `<div class="build-title">${entry.name}</div><div class="build-cost">$${entry.cost}</div><div class="build-req" id="req-${uKey}"></div>`;
+    card.addEventListener('click', () => {
+      engine.issueCommand({ type: 'START_PRODUCTION', itemType: uKey });
+    });
+    gridUnitsEl.appendChild(card);
+    cardElements.set(uKey, card);
+  }
 
   btnDeployMcv.addEventListener('click', () => {
     const selectedMcv = Array.from(engine.units.values()).find(
       (u) => u.ownerId === 1 && u.selected && u.type === 'MCV'
     );
-    if (selectedMcv) {
-      engine.issueCommand({ type: 'DEPLOY_MCV', unitId: selectedMcv.id });
-    }
+    if (selectedMcv) engine.issueCommand({ type: 'DEPLOY_MCV', unitId: selectedMcv.id });
   });
 
   btnAttackMove.addEventListener('click', () => {
@@ -369,6 +330,7 @@ async function bootstrap() {
   });
 
   btnRestart.addEventListener('click', () => {
+    vfx.clearDecals();
     engine.resetMatch();
     camera.x = -110;
     camera.y = -120;
@@ -377,11 +339,8 @@ async function bootstrap() {
 
   function findHostileAtWorldPos(wx: number, wy: number): number | null {
     for (const u of engine.units.values()) {
-      if (u.ownerId === 1) continue;
-      if (!engine.isWorldPosVisibleToPlayer(u.x, u.y)) continue;
-      if (Math.hypot(u.x - wx, u.y - wy) <= u.radius + 8) {
-        return u.id;
-      }
+      if (u.ownerId === 1 || !engine.isWorldPosVisibleToPlayer(u.x, u.y)) continue;
+      if (Math.hypot(u.x - wx, u.y - wy) <= u.radius + 8) return u.id;
     }
     const { TILE_SIZE } = GAME_CONFIG;
     for (const b of engine.buildings.values()) {
@@ -390,26 +349,16 @@ async function bootstrap() {
       const right = (b.gridX + b.widthTiles) * TILE_SIZE;
       const top = b.gridY * TILE_SIZE;
       const bottom = (b.gridY + b.heightTiles) * TILE_SIZE;
-      if (wx >= left && wx <= right && wy >= top && wy <= bottom) {
-        return b.id;
-      }
+      if (wx >= left && wx <= right && wy >= top && wy <= bottom) return b.id;
     }
     return null;
   }
 
-  // ============================================================================
-  // CANVAS POINTER & KEYBOARD INPUT
-  // ============================================================================
   app.canvas.addEventListener('dblclick', (e: MouseEvent) => {
     const rect = app.canvas.getBoundingClientRect();
     const worldPos = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-
     for (const u of engine.units.values()) {
-      if (
-        u.ownerId === 1 &&
-        u.type === 'MCV' &&
-        Math.hypot(u.x - worldPos.x, u.y - worldPos.y) <= u.radius + 8
-      ) {
+      if (u.ownerId === 1 && u.type === 'MCV' && Math.hypot(u.x - worldPos.x, u.y - worldPos.y) <= u.radius + 8) {
         engine.issueCommand({ type: 'DEPLOY_MCV', unitId: u.id });
         break;
       }
@@ -430,9 +379,7 @@ async function bootstrap() {
         const h = entry.heightTiles ?? 2;
         const gx = Math.floor(worldPos.x / GAME_CONFIG.TILE_SIZE - w / 2 + 0.5);
         const gy = Math.floor(worldPos.y / GAME_CONFIG.TILE_SIZE - h / 2 + 0.5);
-
-        const check = engine.validateBuildingPlacement(bType, gx, gy);
-        if (check.valid) {
+        if (engine.validateBuildingPlacement(bType, gx, gy).valid) {
           engine.issueCommand({ type: 'PLACE_BUILDING', gridX: gx, gridY: gy });
           isPlacementMode = false;
         }
@@ -444,12 +391,7 @@ async function bootstrap() {
           .filter((u) => u.ownerId === 1 && u.selected)
           .map((u) => u.id);
         if (selectedIds.length > 0) {
-          engine.issueCommand({
-            type: 'ATTACK_MOVE',
-            unitIds: selectedIds,
-            targetX: worldPos.x,
-            targetY: worldPos.y,
-          });
+          engine.issueCommand({ type: 'ATTACK_MOVE', unitIds: selectedIds, targetX: worldPos.x, targetY: worldPos.y });
           orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0xff4444 };
         }
         isAttackMoveMode = false;
@@ -472,18 +414,12 @@ async function bootstrap() {
         return;
       }
 
-      const selectedUnits = Array.from(engine.units.values()).filter(
-        (u) => u.ownerId === 1 && u.selected
-      );
+      const selectedUnits = Array.from(engine.units.values()).filter((u) => u.ownerId === 1 && u.selected);
       if (selectedUnits.length === 0) return;
 
       const hostileId = findHostileAtWorldPos(worldPos.x, worldPos.y);
       if (hostileId !== null) {
-        engine.issueCommand({
-          type: 'ATTACK',
-          unitIds: selectedUnits.map((u) => u.id),
-          targetEntityId: hostileId,
-        });
+        engine.issueCommand({ type: 'ATTACK', unitIds: selectedUnits.map((u) => u.id), targetEntityId: hostileId });
         orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0xff3333 };
         return;
       }
@@ -491,9 +427,7 @@ async function bootstrap() {
       const { TILE_SIZE } = GAME_CONFIG;
       const clickedGX = Math.floor(worldPos.x / TILE_SIZE);
       const clickedGY = Math.floor(worldPos.y / TILE_SIZE);
-      const selectedHarvesterIds = selectedUnits
-        .filter((u) => u.type === 'HARVESTER')
-        .map((u) => u.id);
+      const selectedHarvesterIds = selectedUnits.filter((u) => u.type === 'HARVESTER').map((u) => u.id);
 
       if (selectedHarvesterIds.length > 0) {
         const clickedRefinery = Array.from(engine.buildings.values()).find(
@@ -505,38 +439,21 @@ async function bootstrap() {
             clickedGY >= b.gridY &&
             clickedGY < b.gridY + b.heightTiles
         );
-
         if (clickedRefinery) {
-          engine.issueCommand({
-            type: 'DIRECT_HARVESTER',
-            unitIds: selectedHarvesterIds,
-            refineryId: clickedRefinery.id,
-          });
+          engine.issueCommand({ type: 'DIRECT_HARVESTER', unitIds: selectedHarvesterIds, refineryId: clickedRefinery.id });
           orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0x55ff77 };
           return;
         }
 
-        const clickedPatch = engine.tiberiumPatches.find(
-          (p) => p.gridX === clickedGX && p.gridY === clickedGY && p.amount > 0
-        );
+        const clickedPatch = engine.tiberiumPatches.find((p) => p.gridX === clickedGX && p.gridY === clickedGY && p.amount > 0);
         if (clickedPatch) {
-          engine.issueCommand({
-            type: 'DIRECT_HARVESTER',
-            unitIds: selectedHarvesterIds,
-            targetGridX: clickedGX,
-            targetGridY: clickedGY,
-          });
+          engine.issueCommand({ type: 'DIRECT_HARVESTER', unitIds: selectedHarvesterIds, targetGridX: clickedGX, targetGridY: clickedGY });
           orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0x55ff77 };
           return;
         }
       }
 
-      engine.issueCommand({
-        type: 'MOVE',
-        unitIds: selectedUnits.map((u) => u.id),
-        targetX: worldPos.x,
-        targetY: worldPos.y,
-      });
+      engine.issueCommand({ type: 'MOVE', unitIds: selectedUnits.map((u) => u.id), targetX: worldPos.x, targetY: worldPos.y });
       orderMarker = { x: worldPos.x, y: worldPos.y, alpha: 1.0, color: 0x55ff77 };
     }
   });
@@ -550,7 +467,6 @@ async function bootstrap() {
       selectionBox.currX = mouseScreen.x;
       selectionBox.currY = mouseScreen.y;
     }
-
     if (camera.isMiddleDragging) {
       camera.x += mouseScreen.x - camera.lastMouseX;
       camera.y += mouseScreen.y - camera.lastMouseY;
@@ -563,7 +479,6 @@ async function bootstrap() {
     if (e.button === 0 && selectionBox.active) {
       selectionBox.active = false;
       const isShift = e.shiftKey;
-
       const minSX = Math.min(selectionBox.startX, selectionBox.currX);
       const maxSX = Math.max(selectionBox.startX, selectionBox.currX);
       const minSY = Math.min(selectionBox.startY, selectionBox.currY);
@@ -576,11 +491,8 @@ async function bootstrap() {
       for (const unit of engine.units.values()) {
         if (unit.ownerId !== 1) continue;
         if (!isShift) unit.selected = false;
-
         if (isSingleClick) {
-          if (Math.hypot(unit.x - p1.x, unit.y - p1.y) <= unit.radius + 6) {
-            unit.selected = true;
-          }
+          if (Math.hypot(unit.x - p1.x, unit.y - p1.y) <= unit.radius + 6) unit.selected = true;
         } else if (unit.x >= p1.x && unit.x <= p2.x && unit.y >= p1.y && unit.y <= p2.y) {
           unit.selected = true;
         }
@@ -594,8 +506,7 @@ async function bootstrap() {
     'wheel',
     (e: WheelEvent) => {
       e.preventDefault();
-      const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
-      camera.zoom = Math.max(0.5, Math.min(2.0, camera.zoom * zoomFactor));
+      camera.zoom = Math.max(0.5, Math.min(2.0, camera.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
     },
     { passive: false }
   );
@@ -605,17 +516,10 @@ async function bootstrap() {
     keysPressed.add(key);
 
     if (key === 'd' && !e.ctrlKey && !e.metaKey) {
-      const selectedMcv = Array.from(engine.units.values()).find(
-        (u) => u.ownerId === 1 && u.selected && u.type === 'MCV'
-      );
-      if (selectedMcv) {
-        engine.issueCommand({ type: 'DEPLOY_MCV', unitId: selectedMcv.id });
-      }
+      const selectedMcv = Array.from(engine.units.values()).find((u) => u.ownerId === 1 && u.selected && u.type === 'MCV');
+      if (selectedMcv) engine.issueCommand({ type: 'DEPLOY_MCV', unitId: selectedMcv.id });
     } else if (key === 'a' && !e.ctrlKey && !e.metaKey) {
-      const hasSelected = Array.from(engine.units.values()).some(
-        (u) => u.ownerId === 1 && u.selected
-      );
-      if (hasSelected) {
+      if (Array.from(engine.units.values()).some((u) => u.ownerId === 1 && u.selected)) {
         isAttackMoveMode = true;
         isPlacementMode = false;
       }
@@ -633,17 +537,13 @@ async function bootstrap() {
     if (/^[1-9]$/.test(e.key)) {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
-        const ids = Array.from(engine.units.values())
-          .filter((u) => u.ownerId === 1 && u.selected)
-          .map((u) => u.id);
+        const ids = Array.from(engine.units.values()).filter((u) => u.ownerId === 1 && u.selected).map((u) => u.id);
         if (ids.length > 0) controlGroups.set(e.key, ids);
       } else {
         const groupIds = controlGroups.get(e.key);
         if (groupIds) {
           for (const unit of engine.units.values()) {
-            if (unit.ownerId === 1) {
-              unit.selected = groupIds.includes(unit.id);
-            }
+            if (unit.ownerId === 1) unit.selected = groupIds.includes(unit.id);
           }
         }
       }
@@ -655,179 +555,211 @@ async function bootstrap() {
   });
 
   // ============================================================================
-  // RENDERING HELPERS
+  // PHASE 5 SPRITE SCENE GRAPH SYNCHRONIZATION
   // ============================================================================
-  function drawTiberiumPatches(): void {
-    tiberiumGraphics.clear();
+  function syncCrystalSprites(): void {
     const { TILE_SIZE } = GAME_CONFIG;
+    const activeKeys = new Set<string>();
 
     for (const patch of engine.tiberiumPatches) {
       if (patch.amount <= 0) continue;
-      if (engine.fogEnabled && engine.fogGrid[patch.gridY][patch.gridX] === 0) continue;
+      const key = `${patch.gridX}_${patch.gridY}`;
+      activeKeys.add(key);
 
-      const cx = patch.gridX * TILE_SIZE + TILE_SIZE / 2;
-      const cy = patch.gridY * TILE_SIZE + TILE_SIZE / 2;
-      const scale = Math.max(0.35, patch.amount / 100);
+      let sp = crystalSprites.get(key);
+      if (!sp) {
+        sp = new Sprite(sprites.crystalStages[3]);
+        sp.x = patch.gridX * TILE_SIZE;
+        sp.y = patch.gridY * TILE_SIZE;
+        crystalContainer.addChild(sp);
+        crystalSprites.set(key, sp);
+      }
 
-      tiberiumGraphics.circle(cx, cy, 15 * scale).fill({ color: 0x23c552, alpha: 0.35 });
-      tiberiumGraphics.circle(cx - 5 * scale, cy - 4 * scale, 5 * scale).fill({ color: 0x4dff79 });
-      tiberiumGraphics.circle(cx + 6 * scale, cy + 3 * scale, 4 * scale).fill({ color: 0x4dff79 });
-      tiberiumGraphics.circle(cx - 2 * scale, cy + 6 * scale, 4.5 * scale).fill({ color: 0x2ee65f });
+      const stageIdx = Math.min(3, Math.max(0, Math.ceil((patch.amount / 100) * 4) - 1));
+      sp.texture = sprites.crystalStages[stageIdx];
+      sp.visible = !engine.fogEnabled || engine.fogGrid[patch.gridY][patch.gridX] > 0;
+    }
+
+    for (const [key, sp] of crystalSprites.entries()) {
+      if (!activeKeys.has(key)) {
+        crystalContainer.removeChild(sp);
+        sp.destroy();
+        crystalSprites.delete(key);
+      }
     }
   }
 
-  function drawBuildings(): void {
-    buildingGraphics.clear();
+  function syncBuildingRigs(): void {
     const { TILE_SIZE } = GAME_CONFIG;
+    const activeIds = new Set<number>();
 
     for (const b of engine.buildings.values()) {
-      if (
-        b.ownerId !== 1 &&
-        engine.fogEnabled &&
-        engine.fogGrid[b.gridY][b.gridX] === 0
-      ) {
-        continue;
+      activeIds.add(b.id);
+      let rig = buildingRigs.get(b.id);
+
+      if (!rig) {
+        const container = new Container();
+        const base = new Sprite(sprites.getBuildingBase(b.type, b.ownerId));
+        container.addChild(base);
+
+        let addon: Sprite | null = null;
+        if (b.type === 'GUARD_TOWER') {
+          addon = new Sprite(sprites.guardTowerTurret);
+          addon.anchor.set(0.5);
+          addon.x = (b.widthTiles * TILE_SIZE) / 2;
+          addon.y = (b.heightTiles * TILE_SIZE) / 2;
+          container.addChild(addon);
+        } else if (b.type === 'RADAR_DOME') {
+          addon = new Sprite(sprites.radarDishTexture);
+          addon.anchor.set(0.5);
+          addon.x = (b.widthTiles * TILE_SIZE) / 2;
+          addon.y = (b.heightTiles * TILE_SIZE) / 2;
+          container.addChild(addon);
+        }
+
+        buildingSpriteLayer.addChild(container);
+        rig = { container, base, addon };
+        buildingRigs.set(b.id, rig);
       }
 
-      const x = b.gridX * TILE_SIZE;
-      const y = b.gridY * TILE_SIZE;
-      const w = b.widthTiles * TILE_SIZE;
-      const h = b.heightTiles * TILE_SIZE;
-      const isGDI = b.ownerId === 1;
-      const primaryColor = isGDI ? 0xd4af37 : 0xd93838;
-      const darkFill = isGDI ? 0x8f7224 : 0x7a1f1f;
+      rig.container.x = b.gridX * TILE_SIZE;
+      rig.container.y = b.gridY * TILE_SIZE;
+      rig.container.visible =
+        b.ownerId === 1 || !engine.fogEnabled || engine.fogGrid[b.gridY][b.gridX] > 0;
 
-      buildingGraphics
-        .rect(x + 3, y + 3, w - 6, h - 6)
-        .fill({ color: 0x262b26 })
-        .stroke({ width: 2, color: primaryColor });
-
-      if (b.type === 'CONSTRUCTION_YARD') {
-        buildingGraphics.rect(x + 12, y + 12, w - 24, h - 24).fill({ color: darkFill });
-        buildingGraphics.circle(x + w * 0.35, y + h * 0.35, 18).fill({ color: primaryColor });
-      } else if (b.type === 'POWER_PLANT') {
-        buildingGraphics.circle(x + w * 0.35, y + h * 0.5, 16).fill({ color: 0x4b594d });
-        buildingGraphics.circle(x + w * 0.35, y + h * 0.5, 9).fill({ color: 0x55ff77 });
-        buildingGraphics.rect(x + w * 0.6, y + 14, 18, h - 28).fill({ color: primaryColor });
-      } else if (b.type === 'REFINERY') {
-        buildingGraphics.rect(x + 10, y + 10, w - 20, h * 0.55).fill({ color: darkFill });
-        buildingGraphics.circle(x + 28, y + 28, 12).fill({ color: 0x2ee65f });
-        buildingGraphics.circle(x + 58, y + 28, 12).fill({ color: 0x2ee65f });
-        buildingGraphics
-          .rect(x + w * 0.25, y + h * 0.62, w * 0.5, h * 0.33)
-          .fill({ color: 0x1b241d })
-          .stroke({ width: 1.5, color: primaryColor });
-      } else if (b.type === 'BARRACKS') {
-        buildingGraphics.rect(x + 12, y + 12, w - 24, h - 24).fill({ color: darkFill });
-        buildingGraphics.circle(x + w / 2, y + h / 2, 12).fill({ color: primaryColor });
-      } else if (b.type === 'WAR_FACTORY') {
-        buildingGraphics.rect(x + 8, y + 8, w - 16, h - 18).fill({ color: darkFill });
-        buildingGraphics.rect(x + 20, y + h - 18, w - 40, 12).fill({ color: primaryColor });
-      } else if (b.type === 'GUARD_TOWER') {
-        const cx = x + w / 2;
-        const cy = y + h / 2;
-        buildingGraphics.circle(cx, cy, 15).fill({ color: darkFill }).stroke({ width: 2, color: primaryColor });
-        const bx = cx + Math.cos(b.turretAngle) * 20;
-        const by = cy + Math.sin(b.turretAngle) * 20;
-        buildingGraphics.moveTo(cx, cy).lineTo(bx, by).stroke({ width: 4, color: 0xeeeeee });
-      } else if (b.type === 'RADAR_DOME') {
-        buildingGraphics.rect(x + 10, y + 10, w - 20, h - 20).fill({ color: darkFill });
-        buildingGraphics
-          .circle(x + w / 2, y + h / 2, 22)
-          .fill({ color: 0x1b2e20 })
-          .stroke({ width: 2, color: 0x55ff77 });
+      if (rig.addon) {
+        if (b.type === 'GUARD_TOWER') {
+          const recoil = b.attackCooldown > 6 ? -3 : 0;
+          rig.addon.rotation = b.turretAngle;
+          rig.addon.x = (b.widthTiles * TILE_SIZE) / 2 + Math.cos(b.turretAngle) * recoil;
+          rig.addon.y = (b.heightTiles * TILE_SIZE) / 2 + Math.sin(b.turretAngle) * recoil;
+        } else if (b.type === 'RADAR_DOME') {
+          rig.addon.rotation += 0.03;
+        }
       }
 
-      const hpRatio = Math.max(0, b.hp / b.maxHp);
-      buildingGraphics.rect(x + 6, y - 7, w - 12, 4).fill({ color: 0x111111 });
-      buildingGraphics
-        .rect(x + 6, y - 7, (w - 12) * hpRatio, 4)
-        .fill({ color: isGDI ? 0x55ff77 : 0xff4444 });
+      // Draw Building Health Bar on Tactical Layer
+      if (rig.container.visible) {
+        const w = b.widthTiles * TILE_SIZE;
+        const hpRatio = Math.max(0, b.hp / b.maxHp);
+        tacticalHudGraphics.rect(rig.container.x + 6, rig.container.y - 7, w - 12, 4).fill({ color: 0x111111 });
+        tacticalHudGraphics
+          .rect(rig.container.x + 6, rig.container.y - 7, (w - 12) * hpRatio, 4)
+          .fill({ color: b.ownerId === 1 ? 0x55ff77 : 0xff4444 });
+      }
+    }
+
+    for (const [id, rig] of buildingRigs.entries()) {
+      if (!activeIds.has(id)) {
+        buildingSpriteLayer.removeChild(rig.container);
+        rig.container.destroy({ children: true });
+        buildingRigs.delete(id);
+      }
     }
   }
 
-  function drawUnit(unit: UnitEntity, rx: number, ry: number): void {
-    if (unit.ownerId !== 1 && !engine.isWorldPosVisibleToPlayer(unit.x, unit.y)) {
-      return;
-    }
+  function syncUnitRigs(alpha: number): { selectedCount: number; harvesterCount: number; nodCount: number } {
+    const activeIds = new Set<number>();
+    let selectedCount = 0;
+    let harvesterCount = 0;
+    let nodCount = 0;
 
-    const r = unit.radius;
-    const isGDI = unit.ownerId === 1;
-    const hullColor = isGDI ? 0xd9a74a : 0xd93b3b;
-    const turretColor = isGDI ? 0xb8862d : 0x992222;
+    for (const unit of engine.units.values()) {
+      activeIds.add(unit.id);
+      if (unit.ownerId === 1) {
+        if (unit.selected) selectedCount++;
+        if (unit.type === 'HARVESTER') harvesterCount++;
+      } else {
+        nodCount++;
+      }
 
-    if (unit.selected) {
-      if (unit.targetEntityId !== null) {
-        const tPos = engine.getEntityWorldPos(unit.targetEntityId);
-        if (tPos) {
-          unitGraphics
-            .moveTo(rx, ry)
-            .lineTo(tPos.x, tPos.y)
-            .stroke({ width: 1.2, color: 0xff4444, alpha: 0.65 });
+      let rig = unitRigs.get(unit.id);
+      if (!rig) {
+        const container = new Container();
+        const hull = new Sprite(sprites.getUnitHull(unit.type, unit.ownerId));
+        hull.anchor.set(0.5);
+        container.addChild(hull);
+
+        let turret: Sprite | null = null;
+        const turretTex = sprites.getUnitTurret(unit.type, unit.ownerId);
+        if (turretTex) {
+          turret = new Sprite(turretTex);
+          turret.anchor.set(0.5);
+          container.addChild(turret);
         }
-      } else if (unit.targetX !== null && unit.targetY !== null) {
-        unitGraphics
-          .moveTo(rx, ry)
-          .lineTo(unit.targetX, unit.targetY)
-          .stroke({
-            width: 1,
-            color: unit.isAttackMove ? 0xff8844 : 0x55ff77,
-            alpha: 0.45,
-          });
+
+        unitSpriteLayer.addChild(container);
+        rig = { container, hull, turret };
+        unitRigs.set(unit.id, rig);
       }
-    }
 
-    if (unit.type === 'LIGHT_INFANTRY') {
-      unitGraphics.circle(rx, ry, r).fill({ color: hullColor }).stroke({ width: 1.5, color: 0x111111 });
-    } else if (unit.type === 'ROCKET_SOLDIER') {
-      unitGraphics.circle(rx, ry, r).fill({ color: hullColor }).stroke({ width: 2, color: 0xffffff });
-      const bx = rx + Math.cos(unit.turretAngle) * (r + 5);
-      const by = ry + Math.sin(unit.turretAngle) * (r + 5);
-      unitGraphics.moveTo(rx, ry).lineTo(bx, by).stroke({ width: 3, color: 0xff6633 });
-    } else if (unit.type === 'MEDIUM_TANK') {
-      unitGraphics
-        .rect(rx - r, ry - r * 0.8, r * 2, r * 1.6)
-        .fill({ color: hullColor })
-        .stroke({ width: 2, color: 0x222222 });
-      unitGraphics
-        .circle(rx, ry, r * 0.55)
-        .fill({ color: turretColor })
-        .stroke({ width: 1.5, color: 0x222222 });
-      const bx = rx + Math.cos(unit.turretAngle) * (r * 1.3);
-      const by = ry + Math.sin(unit.turretAngle) * (r * 1.3);
-      unitGraphics.moveTo(rx, ry).lineTo(bx, by).stroke({ width: 4, color: 0x222222 });
-    } else if (unit.type === 'HARVESTER') {
-      unitGraphics
-        .rect(rx - r, ry - r * 0.85, r * 2, r * 1.7)
-        .fill({ color: isGDI ? 0xe6b800 : 0xb83232 })
-        .stroke({ width: 2, color: 0x1f1f1f });
+      const rx = unit.prevX + (unit.x - unit.prevX) * alpha;
+      const ry = unit.prevY + (unit.y - unit.prevY) * alpha;
+      const isVisible = unit.ownerId === 1 || engine.isWorldPosVisibleToPlayer(unit.x, unit.y);
 
-      const pips = 5;
-      const filledPips = Math.round((unit.tiberiumLoad / unit.maxTiberiumLoad) * pips);
-      for (let i = 0; i < pips; i++) {
-        unitGraphics
-          .rect(rx - r + 4 + i * 7, ry - 4, 5, 8)
-          .fill({ color: i < filledPips ? 0x2ee65f : 0x2c352d });
+      rig.container.visible = isVisible;
+      if (!isVisible) continue;
+
+      rig.container.x = rx;
+      rig.container.y = ry;
+      rig.hull.rotation = unit.hullAngle;
+
+      if (rig.turret && unit.weapon) {
+        rig.turret.rotation = unit.turretAngle;
+        // Firing recoil kickback
+        const kick = unit.attackCooldown > unit.weapon.cooldownTicks - 3 ? -3.5 : 0;
+        rig.turret.x = Math.cos(unit.turretAngle) * kick;
+        rig.turret.y = Math.sin(unit.turretAngle) * kick;
       }
-    } else if (unit.type === 'MCV') {
-      unitGraphics
-        .rect(rx - r, ry - r, r * 2, r * 2)
-        .fill({ color: hullColor })
-        .stroke({ width: 2.5, color: 0x111111 });
-      unitGraphics.circle(rx, ry, r * 0.5).fill({ color: 0x55ff77 });
-    }
 
-    if (unit.selected || !isGDI) {
-      const b = r + 5;
+      // Harvester 5-pip load indicator & Selection Brackets
+      const r = unit.radius;
+      if (unit.type === 'HARVESTER') {
+        const pips = 5;
+        const filled = Math.round((unit.tiberiumLoad / unit.maxTiberiumLoad) * pips);
+        for (let i = 0; i < pips; i++) {
+          tacticalHudGraphics
+            .rect(rx - 14 + i * 6, ry + r + 3, 4, 4)
+            .fill({ color: i < filled ? 0x2ee65f : 0x222a22 });
+        }
+      }
+
       if (unit.selected) {
-        unitGraphics.rect(rx - b, ry - b, b * 2, b * 2).stroke({ width: 1.5, color: 0x55ff77 });
+        if (unit.targetEntityId !== null) {
+          const tPos = engine.getEntityWorldPos(unit.targetEntityId);
+          if (tPos) {
+            tacticalHudGraphics.moveTo(rx, ry).lineTo(tPos.x, tPos.y).stroke({ width: 1.2, color: 0xff4444, alpha: 0.65 });
+          }
+        } else if (unit.targetX !== null && unit.targetY !== null) {
+          tacticalHudGraphics
+            .moveTo(rx, ry)
+            .lineTo(unit.targetX, unit.targetY)
+            .stroke({ width: 1, color: unit.isAttackMove ? 0xff8844 : 0x55ff77, alpha: 0.45 });
+        }
       }
-      const hpRatio = Math.max(0, unit.hp / unit.maxHp);
-      unitGraphics.rect(rx - b, ry - b - 6, b * 2, 4).fill({ color: 0x111111 });
-      unitGraphics
-        .rect(rx - b, ry - b - 6, b * 2 * hpRatio, 4)
-        .fill({ color: isGDI ? 0x55ff77 : 0xff4444 });
+
+      if (unit.selected || unit.ownerId !== 1) {
+        const b = r + 5;
+        if (unit.selected) {
+          tacticalHudGraphics.rect(rx - b, ry - b, b * 2, b * 2).stroke({ width: 1.5, color: 0x55ff77 });
+        }
+        const hpRatio = Math.max(0, unit.hp / unit.maxHp);
+        tacticalHudGraphics.rect(rx - b, ry - b - 6, b * 2, 4).fill({ color: 0x111111 });
+        tacticalHudGraphics
+          .rect(rx - b, ry - b - 6, b * 2 * hpRatio, 4)
+          .fill({ color: unit.ownerId === 1 ? 0x55ff77 : 0xff4444 });
+      }
     }
+
+    for (const [id, rig] of unitRigs.entries()) {
+      if (!activeIds.has(id)) {
+        unitSpriteLayer.removeChild(rig.container);
+        rig.container.destroy({ children: true });
+        unitRigs.delete(id);
+      }
+    }
+
+    return { selectedCount, harvesterCount, nodCount };
   }
 
   function drawProjectilesAndExplosions(alpha: number): void {
@@ -839,12 +771,12 @@ async function bootstrap() {
       const ry = proj.prevY + (proj.y - proj.prevY) * alpha;
 
       if (proj.style === 'BULLET') {
-        projectileGraphics.circle(rx, ry, 2.5).fill({ color: 0xffee55 });
+        projectileGraphics.moveTo(proj.prevX, proj.prevY).lineTo(rx, ry).stroke({ width: 2, color: 0xffee66 });
       } else if (proj.style === 'SHELL') {
-        projectileGraphics.circle(rx, ry, 4.5).fill({ color: 0xffaa33 }).stroke({ width: 1, color: 0xffffff });
+        projectileGraphics.circle(rx, ry, 4.5).fill({ color: 0xffaa33 }).stroke({ width: 1.2, color: 0xffffff });
       } else if (proj.style === 'ROCKET') {
         projectileGraphics.circle(rx, ry, 4).fill({ color: 0xff4422 });
-        projectileGraphics.circle(proj.prevX, proj.prevY, 3).fill({ color: 0xaaaaaa, alpha: 0.6 });
+        projectileGraphics.circle(proj.prevX, proj.prevY, 3.5).fill({ color: 0xbbbbbb, alpha: 0.65 });
       }
     }
 
@@ -855,29 +787,8 @@ async function bootstrap() {
       const fade = 1 - progress;
       projectileGraphics
         .circle(exp.x, exp.y, radius)
-        .fill({ color: exp.color, alpha: fade * 0.55 })
+        .fill({ color: exp.color, alpha: fade * 0.6 })
         .stroke({ width: 2, color: 0xffffaa, alpha: fade });
-    }
-  }
-
-  function drawFogOfWar(): void {
-    fogGraphics.clear();
-    if (!engine.fogEnabled) return;
-
-    const { MAP_ROWS, MAP_COLS, TILE_SIZE } = GAME_CONFIG;
-    for (let r = 0; r < MAP_ROWS; r++) {
-      for (let c = 0; c < MAP_COLS; c++) {
-        const state = engine.fogGrid[r][c];
-        if (state === 0) {
-          fogGraphics
-            .rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-            .fill({ color: 0x050705, alpha: 0.96 });
-        } else if (state === 1) {
-          fogGraphics
-            .rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-            .fill({ color: 0x080c08, alpha: 0.55 });
-        }
-      }
     }
   }
 
@@ -908,32 +819,28 @@ async function bootstrap() {
 
     for (const b of engine.buildings.values()) {
       if (b.ownerId !== 1) continue;
-      const cx = (b.gridX + b.widthTiles / 2) * TILE_SIZE;
-      const cy = (b.gridY + b.heightTiles / 2) * TILE_SIZE;
       placementGraphics
-        .circle(cx, cy, BASE_ADJACENCY_TILES * TILE_SIZE)
+        .circle((b.gridX + b.widthTiles / 2) * TILE_SIZE, (b.gridY + b.heightTiles / 2) * TILE_SIZE, BASE_ADJACENCY_TILES * TILE_SIZE)
         .stroke({ width: 1.5, color: 0x55ff77, alpha: 0.3 });
     }
 
     const worldPos = screenToWorld(mouseScreen.x, mouseScreen.y);
-    const gx = Math.floor(worldPos.x / GAME_CONFIG.TILE_SIZE - w / 2 + 0.5);
-    const gy = Math.floor(worldPos.y / GAME_CONFIG.TILE_SIZE - h / 2 + 0.5);
+    const gx = Math.floor(worldPos.x / TILE_SIZE - w / 2 + 0.5);
+    const gy = Math.floor(worldPos.y / TILE_SIZE - h / 2 + 0.5);
     const check = engine.validateBuildingPlacement(bType, gx, gy);
 
     for (let dy = 0; dy < h; dy++) {
       for (let dx = 0; dx < w; dx++) {
         const tileValid = check.tileMatrix[dy][dx];
-        const tx = (gx + dx) * TILE_SIZE;
-        const ty = (gy + dy) * TILE_SIZE;
         placementGraphics
-          .rect(tx + 2, ty + 2, TILE_SIZE - 4, TILE_SIZE - 4)
+          .rect((gx + dx) * TILE_SIZE + 2, (gy + dy) * TILE_SIZE + 2, TILE_SIZE - 4, TILE_SIZE - 4)
           .fill({ color: tileValid ? 0x33ff66 : 0xff3333, alpha: 0.45 })
           .stroke({ width: 1.5, color: tileValid ? 0x55ff77 : 0xff5555 });
       }
     }
   }
 
-  // DOM Elements
+  // Telemetry & Sidebar DOM Sync
   const elTick = document.getElementById('stat-tick')!;
   const elSelected = document.getElementById('stat-selected')!;
   const elHarvesters = document.getElementById('stat-harvesters')!;
@@ -953,7 +860,6 @@ async function bootstrap() {
 
   function syncSidebarUI(): void {
     elCredits.textContent = `$ ${Math.floor(engine.credits).toLocaleString()}`;
-
     const power = engine.getPowerStats(1);
     elPowerText.textContent = `${power.produced} / ${power.consumed} MW`;
     const ratio = power.consumed === 0 ? 100 : Math.min(100, (power.produced / power.consumed) * 100);
@@ -962,38 +868,23 @@ async function bootstrap() {
     elEconRate.textContent = power.isLowPower ? 'LOW POWER (50% SPD)' : 'POWER NORMAL';
     elEconRate.style.color = power.isLowPower ? '#ff6666' : '#7a9a7e';
 
-    const mcvSelected = Array.from(engine.units.values()).some(
-      (u) => u.ownerId === 1 && u.selected && u.type === 'MCV'
-    );
-    btnDeployMcv.disabled = !mcvSelected;
+    btnDeployMcv.disabled = !Array.from(engine.units.values()).some((u) => u.ownerId === 1 && u.selected && u.type === 'MCV');
     btnAttackMove.classList.toggle('active-toggle', isAttackMoveMode);
 
     for (const [key, card] of cardElements.entries()) {
       const unlocked = engine.hasPrerequisites(key, 1);
       const reqEl = document.getElementById(`req-${key}`)!;
-      if (unlocked) {
-        card.classList.remove('locked');
-        reqEl.textContent = '';
-      } else {
-        card.classList.add('locked');
-        reqEl.textContent = `Req: ${CATALOG[key].prerequisites[CATALOG[key].prerequisites.length - 1]
-          .replace('_', ' ')}`;
-      }
-
-      if (engine.buildingQueue?.readyToPlace && engine.buildingQueue.itemType === key) {
-        card.classList.add('active-place');
-      } else {
-        card.classList.remove('active-place');
-      }
+      card.classList.toggle('locked', !unlocked);
+      reqEl.textContent = unlocked
+        ? ''
+        : `Req: ${CATALOG[key].prerequisites[CATALOG[key].prerequisites.length - 1].replace('_', ' ')}`;
+      card.classList.toggle('active-place', Boolean(engine.buildingQueue?.readyToPlace && engine.buildingQueue.itemType === key));
     }
 
     if (engine.buildingQueue) {
       btnCancelBldg.style.display = 'inline-block';
-      const pct = Math.floor(
-        (engine.buildingQueue.completedTicks / engine.buildingQueue.totalTicks) * 100
-      );
+      const pct = Math.floor((engine.buildingQueue.completedTicks / engine.buildingQueue.totalTicks) * 100);
       elProgBldg.style.width = `${pct}%`;
-
       if (engine.buildingQueue.readyToPlace) {
         elStatusBldg.textContent = `${CATALOG[engine.buildingQueue.itemType].name}: CLICK MAP`;
         if (!wasBuildingReadyLastFrame) {
@@ -1002,9 +893,7 @@ async function bootstrap() {
         }
       } else {
         wasBuildingReadyLastFrame = false;
-        elStatusBldg.textContent = engine.buildingQueue.onHold
-          ? 'ON HOLD (NO FUNDS)'
-          : `${CATALOG[engine.buildingQueue.itemType].name} (${pct}%)`;
+        elStatusBldg.textContent = engine.buildingQueue.onHold ? 'ON HOLD (NO FUNDS)' : `${CATALOG[engine.buildingQueue.itemType].name} (${pct}%)`;
       }
     } else {
       wasBuildingReadyLastFrame = false;
@@ -1015,60 +904,45 @@ async function bootstrap() {
 
     if (engine.unitQueue) {
       btnCancelUnit.style.display = 'inline-block';
-      const pct = Math.floor(
-        (engine.unitQueue.completedTicks / engine.unitQueue.totalTicks) * 100
-      );
+      const pct = Math.floor((engine.unitQueue.completedTicks / engine.unitQueue.totalTicks) * 100);
       elProgUnit.style.width = `${pct}%`;
-      elStatusUnit.textContent = engine.unitQueue.onHold
-        ? 'ON HOLD (NO FUNDS)'
-        : `${CATALOG[engine.unitQueue.itemType].name} (${pct}%)`;
+      elStatusUnit.textContent = engine.unitQueue.onHold ? 'ON HOLD (NO FUNDS)' : `${CATALOG[engine.unitQueue.itemType].name} (${pct}%)`;
     } else {
       btnCancelUnit.style.display = 'none';
       elStatusUnit.textContent = 'Idle';
       elProgUnit.style.width = '0%';
     }
 
-    // Victory / Defeat Overlay
     if (engine.matchStatus !== 'PLAYING') {
       matchOverlay.style.display = 'flex';
-      if (engine.matchStatus === 'VICTORY') {
-        matchTitle.textContent = 'GDI MISSION ACCOMPLISHED';
-        matchTitle.style.color = '#55ff77';
-        matchSubtitle.textContent =
-          'All Brotherhood of Nod structures and forces in this sector have been neutralized.';
-      } else {
-        matchTitle.textContent = 'BROTHERHOOD OF NOD VICTORY';
-        matchTitle.style.color = '#ff4444';
-        matchSubtitle.textContent =
-          'Your GDI expeditionary force was wiped out. Re-deploy and secure your perimeter early!';
-      }
+      matchTitle.textContent = engine.matchStatus === 'VICTORY' ? 'GDI MISSION ACCOMPLISHED' : 'BROTHERHOOD OF NOD VICTORY';
+      matchTitle.style.color = engine.matchStatus === 'VICTORY' ? '#55ff77' : '#ff4444';
+      matchSubtitle.textContent =
+        engine.matchStatus === 'VICTORY'
+          ? 'All hostile structures and forces in this sector have been neutralized.'
+          : 'Your expeditionary force was eliminated.';
     }
   }
 
-  // ============================================================================
-  // MAIN FIXED-TIMESTEP ACCUMULATOR LOOP
-  // ============================================================================
+  // Main Fixed-Timestep Loop
   let lastTime = performance.now();
   let accumulator = 0;
 
   app.ticker.add(() => {
     const now = performance.now();
-    const frameDelta = Math.min(now - lastTime, 250);
+    accumulator += Math.min(now - lastTime, 250);
     lastTime = now;
-    accumulator += frameDelta;
 
     while (accumulator >= GAME_CONFIG.TICK_MS) {
       engine.stepSimulationTick();
       accumulator -= GAME_CONFIG.TICK_MS;
     }
 
-    // Process synthesized audio & EVA events emitted during simulation ticks
     for (const ev of engine.consumeEvents()) {
       if (ev.sfx) audio.playSfx(ev.sfx);
       if (ev.evaSpeech) audio.speakEva(ev.evaSpeech);
     }
 
-    // Camera Panning
     if (keysPressed.has('w') || keysPressed.has('arrowup')) camera.y += camera.panSpeed;
     if (keysPressed.has('s') || keysPressed.has('arrowdown')) camera.y -= camera.panSpeed;
     if (keysPressed.has('a') || keysPressed.has('arrowleft')) camera.x += camera.panSpeed;
@@ -1078,42 +952,26 @@ async function bootstrap() {
     worldContainer.y = camera.y;
     worldContainer.scale.set(camera.zoom);
 
-    drawTiberiumPatches();
-    drawBuildings();
-
     const alpha = accumulator / GAME_CONFIG.TICK_MS;
-    unitGraphics.clear();
+    tacticalHudGraphics.clear();
 
     if (orderMarker) {
-      unitGraphics
+      tacticalHudGraphics
         .circle(orderMarker.x, orderMarker.y, 15 * orderMarker.alpha)
         .stroke({ width: 2, color: orderMarker.color, alpha: orderMarker.alpha });
       orderMarker.alpha -= 0.04;
       if (orderMarker.alpha <= 0) orderMarker = null;
     }
 
-    let selectedCount = 0;
-    let harvesterCount = 0;
-    let nodCount = 0;
-
-    for (const unit of engine.units.values()) {
-      if (unit.ownerId === 1) {
-        if (unit.selected) selectedCount++;
-        if (unit.type === 'HARVESTER') harvesterCount++;
-      } else {
-        nodCount++;
-      }
-      const renderX = unit.prevX + (unit.x - unit.prevX) * alpha;
-      const renderY = unit.prevY + (unit.y - unit.prevY) * alpha;
-      drawUnit(unit, renderX, renderY);
-    }
-
+    syncCrystalSprites();
+    syncBuildingRigs();
+    const counts = syncUnitRigs(alpha);
     for (const b of engine.buildings.values()) {
-      if (b.ownerId !== 1) nodCount++;
+      if (b.ownerId !== 1) counts.nodCount++;
     }
 
     drawProjectilesAndExplosions(alpha);
-    drawFogOfWar();
+    vfx.update(engine);
     drawPlacementPreview();
     renderRadarMinimap();
 
@@ -1122,19 +980,15 @@ async function bootstrap() {
       const x = Math.min(selectionBox.startX, selectionBox.currX);
       const y = Math.min(selectionBox.startY, selectionBox.currY);
       const w = Math.abs(selectionBox.currX - selectionBox.startX);
-      const h = Math.abs(selectionBox.currY - selectionBox.startY);
-      uiOverlayGraphics
-        .rect(x, y, w, h)
-        .fill({ color: 0x55ff77, alpha: 0.15 })
-        .stroke({ width: 1.5, color: 0x55ff77 });
+      const h = Math.abs(selectionBox.startY - selectionBox.currY);
+      uiOverlayGraphics.rect(x, y, w, h).fill({ color: 0x55ff77, alpha: 0.15 }).stroke({ width: 1.5, color: 0x55ff77 });
     }
 
-    const waveSeconds = Math.ceil(engine.aiWaveCountdownTicks / GAME_CONFIG.TICK_RATE);
     elTick.textContent = String(engine.currentTick);
-    elSelected.textContent = String(selectedCount);
-    elHarvesters.textContent = String(harvesterCount);
-    elEnemies.textContent = String(nodCount);
-    elWave.textContent = `Next Wave: ${waveSeconds}s`;
+    elSelected.textContent = String(counts.selectedCount);
+    elHarvesters.textContent = String(counts.harvesterCount);
+    elEnemies.textContent = String(counts.nodCount);
+    elWave.textContent = `Next Wave: ${Math.ceil(engine.aiWaveCountdownTicks / GAME_CONFIG.TICK_RATE)}s`;
     elCmd.textContent = engine.lastCommandText;
     syncSidebarUI();
   });
