@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Command & Conquer: Web RTS (Phase 3 — Combat & Fog of War)</title>
+  <title>Command & Conquer: Web RTS (Phase 4 — Skirmish Finale)</title>
   <style>
     * {
       box-sizing: border-box;
@@ -31,20 +31,24 @@
       position: absolute;
       top: 12px;
       left: 12px;
-      background: rgba(10, 18, 12, 0.88);
+      background: rgba(10, 18, 12, 0.9);
       border: 1px solid #2e6f40;
       padding: 8px 12px;
       font-size: 12px;
-      line-height: 1.5;
+      line-height: 1.55;
       pointer-events: none;
       z-index: 10;
+    }
+    .wave-alert {
+      color: #ff7777;
+      font-weight: bold;
     }
     #mode-banner {
       position: absolute;
       top: 12px;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(18, 45, 24, 0.94);
+      background: rgba(18, 45, 24, 0.95);
       border: 1px solid #55ff77;
       padding: 6px 16px;
       font-size: 12px;
@@ -54,15 +58,54 @@
       pointer-events: none;
       z-index: 15;
     }
+    #match-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(5, 10, 6, 0.82);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+      gap: 16px;
+      text-align: center;
+    }
+    #match-title {
+      font-size: 36px;
+      font-weight: bold;
+      letter-spacing: 3px;
+      color: #55ff77;
+      text-shadow: 0 0 18px rgba(85, 255, 119, 0.6);
+    }
+    #match-subtitle {
+      font-size: 14px;
+      color: #b8e6c0;
+      max-width: 420px;
+      line-height: 1.5;
+    }
+    #btn-restart {
+      background: #1d3b23;
+      color: #55ff77;
+      border: 2px solid #55ff77;
+      padding: 10px 24px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      letter-spacing: 1px;
+    }
+    #btn-restart:hover {
+      background: #2b5934;
+    }
     #sidebar {
-      width: 290px;
+      width: 295px;
       height: 100%;
       background: #161a16;
       border-left: 3px solid #3a4a3c;
       display: flex;
       flex-direction: column;
-      padding: 10px;
-      gap: 9px;
+      padding: 9px;
+      gap: 8px;
       z-index: 20;
       overflow-y: auto;
     }
@@ -72,7 +115,7 @@
       padding: 8px;
     }
     .credits-display {
-      font-size: 21px;
+      font-size: 20px;
       font-weight: bold;
       color: #55ff77;
       text-align: right;
@@ -82,14 +125,32 @@
       font-size: 11px;
       color: #7a9a7e;
       text-transform: uppercase;
-      margin-bottom: 5px;
+      margin-bottom: 4px;
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
+    #radar-wrapper {
+      position: relative;
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      background: #060906;
+      border: 1px solid #2e5936;
+    }
+    #radar-canvas {
+      width: 184px;
+      height: 184px;
+      cursor: pointer;
+      display: block;
+    }
+    #radar-status-tag {
+      font-size: 10px;
+      color: #ffdd44;
+    }
     .power-bar-bg {
       width: 100%;
-      height: 9px;
+      height: 8px;
       background: #1a211a;
       border: 1px solid #334d36;
       overflow: hidden;
@@ -104,16 +165,16 @@
     .btn-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 6px;
+      gap: 5px;
     }
     .action-btn {
       width: 100%;
       background: #182b1c;
       color: #88ff9e;
       border: 1px solid #3c7d49;
-      padding: 7px 6px;
+      padding: 6px 5px;
       font-family: inherit;
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: bold;
       cursor: pointer;
       text-align: center;
@@ -140,7 +201,7 @@
     .build-card {
       background: #131914;
       border: 1px solid #2c4730;
-      padding: 6px;
+      padding: 5px 6px;
       cursor: pointer;
       display: flex;
       flex-direction: column;
@@ -165,7 +226,7 @@
       to { border-color: #55ff77; }
     }
     .build-title {
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: bold;
       color: #d6ffe0;
     }
@@ -174,12 +235,12 @@
       color: #55ff77;
     }
     .build-req {
-      font-size: 9px;
+      font-size: 8.5px;
       color: #ff7777;
     }
     .queue-status {
-      margin-top: 5px;
-      font-size: 11px;
+      margin-top: 4px;
+      font-size: 10.5px;
       color: #b5e6be;
       display: flex;
       justify-content: space-between;
@@ -190,7 +251,7 @@
       height: 6px;
       background: #1a211a;
       border: 1px solid #2e4a31;
-      margin-top: 4px;
+      margin-top: 3px;
     }
     .progress-fill {
       height: 100%;
@@ -201,18 +262,10 @@
       background: #3a1818;
       color: #ff8888;
       border: 1px solid #773333;
-      font-size: 10px;
-      padding: 2px 6px;
+      font-size: 9.5px;
+      padding: 1px 5px;
       cursor: pointer;
       font-family: inherit;
-    }
-    .controls-guide {
-      font-size: 10.5px;
-      color: #9ab89e;
-      line-height: 1.45;
-    }
-    .controls-guide strong {
-      color: #55ff77;
     }
   </style>
 </head>
@@ -221,10 +274,17 @@
     <div id="hud-top">
       <div><strong>SIM TICK:</strong> <span id="stat-tick">0</span> (20 Hz)</div>
       <div><strong>GDI FORCES:</strong> <span id="stat-selected">0</span> sel | <span id="stat-harvesters">1</span> harv</div>
-      <div><strong>NOD HOSTILES:</strong> <span id="stat-enemies">0</span> remaining</div>
-      <div><strong>LAST CMD:</strong> <span id="stat-cmd">Scout East to find Nod Outpost</span></div>
+      <div><strong>NOD FORCES:</strong> <span id="stat-enemies">0</span> active | <span class="wave-alert" id="stat-wave">Next Wave: 45s</span></div>
+      <div><strong>EVA LOG:</strong> <span id="stat-cmd">Deploy MCV [D] &amp; prepare defenses</span></div>
     </div>
+
     <div id="mode-banner"></div>
+
+    <div id="match-overlay">
+      <div id="match-title">MISSION ACCOMPLISHED</div>
+      <div id="match-subtitle">All Brotherhood of Nod forces in this sector have been eliminated.</div>
+      <button id="btn-restart">PLAY NEW SKIRMISH</button>
+    </div>
   </div>
 
   <aside id="sidebar">
@@ -234,10 +294,7 @@
         <span id="stat-econ-rate">Power Normal</span>
       </div>
       <div class="credits-display" id="stat-credits">$ 5,000</div>
-    </div>
-
-    <div class="panel-box">
-      <div class="label">
+      <div class="label" style="margin-top: 5px; margin-bottom: 2px;">
         <span>Base Power</span>
         <span id="stat-power-text">0 / 0 MW</span>
       </div>
@@ -247,11 +304,24 @@
     </div>
 
     <div class="panel-box">
-      <div class="btn-row" style="margin-bottom: 6px;">
+      <div class="label">
+        <span>Tactical Radar</span>
+        <span id="radar-status-tag">LOCAL SENSORS</span>
+      </div>
+      <div id="radar-wrapper">
+        <canvas id="radar-canvas" width="184" height="184"></canvas>
+      </div>
+    </div>
+
+    <div class="panel-box">
+      <div class="btn-row" style="margin-bottom: 5px;">
         <button id="btn-deploy-mcv" class="action-btn" disabled>DEPLOY MCV [D]</button>
         <button id="btn-attack-move" class="action-btn">ATK-MOVE [A]</button>
       </div>
-      <button id="btn-toggle-fog" class="action-btn">FOG OF WAR: ON [F]</button>
+      <div class="btn-row">
+        <button id="btn-toggle-fog" class="action-btn">FOG: ON [F]</button>
+        <button id="btn-toggle-audio" class="action-btn">AUDIO: ON [M]</button>
+      </div>
     </div>
 
     <div class="panel-box">
@@ -272,18 +342,6 @@
       <div class="build-grid" id="grid-units"></div>
       <div class="queue-status" id="status-unit">Idle</div>
       <div class="progress-bg"><div class="progress-fill" id="prog-unit"></div></div>
-    </div>
-
-    <div class="panel-box" style="flex: 1;">
-      <div class="label">Phase 3 Combat Guide</div>
-      <div class="controls-guide">
-        • <strong>Right-Click Enemy:</strong> Focus-fire target<br/>
-        • <strong>[A] + Left-Click:</strong> Attack-Move march<br/>
-        • <strong>[F] Key:</strong> Toggle Fog of War shroud<br/>
-        • <strong>Minigunners (SA):</strong> Best vs Infantry<br/>
-        • <strong>Rockets &amp; Tanks (AP):</strong> Best vs Armor &amp; Structures<br/>
-        • <strong>Guard Tower:</strong> Auto-defends base perimeter
-      </div>
     </div>
   </aside>
 

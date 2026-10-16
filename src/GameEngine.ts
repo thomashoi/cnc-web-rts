@@ -8,6 +8,8 @@ import {
   GAME_CONFIG,
   GameCommand,
   CommandPayload,
+  GameEvent,
+  MatchStatus,
   ProductionItem,
   ProjectileEntity,
   TiberiumPatch,
@@ -20,27 +22,68 @@ import {
 export class GameEngine {
   public currentTick = 0;
   public credits = 5000;
+  public nodCredits = 3500;
+  public matchStatus: MatchStatus = 'PLAYING';
+
   public units: Map<number, UnitEntity> = new Map();
   public buildings: Map<number, BuildingEntity> = new Map();
   public projectiles: Map<number, ProjectileEntity> = new Map();
   public explosions: ExplosionEffect[] = [];
   public tiberiumPatches: TiberiumPatch[] = [];
   public commandQueue: GameCommand[] = [];
-  public lastCommandText = 'Deploy MCV [D] & scout East for Nod forces!';
+  public pendingEvents: GameEvent[] = [];
 
-  // Fog of War Matrix: [row][col] -> 0 (Shroud), 1 (Explored Fog), 2 (Visible)
+  public lastCommandText = 'Deploy MCV [D] & prepare for Nod waves!';
+
   public fogGrid: VisibilityState[][] = [];
   public fogEnabled = true;
 
   public buildingQueue: ProductionItem | null = null;
   public unitQueue: ProductionItem | null = null;
 
+  // Nod Skirmish AI state
+  public aiWaveCountdownTicks = GAME_CONFIG.AI_WAVE_INTERVAL_TICKS;
+  private aiProductionCooldown = 80;
   private nextEntityId = 1;
+  private wasLowPowerLastTick = false;
 
   constructor() {
+    this.resetMatch();
+  }
+
+  public resetMatch(): void {
+    this.currentTick = 0;
+    this.credits = 5000;
+    this.nodCredits = 3500;
+    this.matchStatus = 'PLAYING';
+    this.units.clear();
+    this.buildings.clear();
+    this.projectiles.clear();
+    this.explosions = [];
+    this.tiberiumPatches = [];
+    this.commandQueue = [];
+    this.pendingEvents = [];
+    this.buildingQueue = null;
+    this.unitQueue = null;
+    this.aiWaveCountdownTicks = GAME_CONFIG.AI_WAVE_INTERVAL_TICKS;
+    this.aiProductionCooldown = 80;
+    this.nextEntityId = 1;
+    this.wasLowPowerLastTick = false;
+
     this.initFogGrid();
     this.seedInitialMap();
     this.updateFogOfWar();
+    this.emitEvent({ evaSpeech: 'Battle control initialized.' });
+  }
+
+  public consumeEvents(): GameEvent[] {
+    const out = this.pendingEvents;
+    this.pendingEvents = [];
+    return out;
+  }
+
+  private emitEvent(ev: GameEvent): void {
+    this.pendingEvents.push(ev);
   }
 
   private initFogGrid(): void {
@@ -69,10 +112,11 @@ export class GameEngine {
     this.spawnUnit('LIGHT_INFANTRY', 625, 475, 1);
     this.spawnUnit('LIGHT_INFANTRY', 625, 515, 1);
 
-    // 2. Seed Tiberium Crystal Fields (Central Valley)
+    // 2. Seed Tiberium Crystal Fields (Western/Central + Eastern Nod Field)
     const patchCenters = [
       { cx: 15, cy: 10 },
-      { cx: 18, cy: 15 },
+      { cx: 18, cy: 16 },
+      { cx: 33, cy: 18 }, // Nod eastern Tiberium field
     ];
     for (const center of patchCenters) {
       for (let dx = -2; dx <= 2; dx++) {
@@ -81,7 +125,7 @@ export class GameEngine {
             this.tiberiumPatches.push({
               gridX: center.cx + dx,
               gridY: center.cy + dy,
-              amount: 100,
+              amount: 120,
             });
           }
         }
@@ -89,24 +133,26 @@ export class GameEngine {
     }
 
     // 3. Seed Hostile Brotherhood of Nod Outpost (Owner 2) in the East
-    this.spawnBuilding('CONSTRUCTION_YARD', 28, 8, 2);
-    this.spawnBuilding('POWER_PLANT', 32, 8, 2);
-    this.spawnBuilding('BARRACKS', 28, 12, 2);
-    this.spawnBuilding('REFINERY', 31, 12, 2);
-    this.spawnBuilding('GUARD_TOWER', 25, 10, 2);
-    this.spawnBuilding('GUARD_TOWER', 25, 14, 2);
+    this.spawnBuilding('CONSTRUCTION_YARD', 29, 7, 2);
+    this.spawnBuilding('POWER_PLANT', 33, 7, 2);
+    this.spawnBuilding('BARRACKS', 29, 11, 2);
+    this.spawnBuilding('REFINERY', 32, 11, 2);
+    this.spawnBuilding('GUARD_TOWER', 26, 9, 2);
+    this.spawnBuilding('GUARD_TOWER', 26, 13, 2);
 
-    // Forward Nod Patrol Squads
-    this.spawnUnit('LIGHT_INFANTRY', 1050, 440, 2);
-    this.spawnUnit('LIGHT_INFANTRY', 1050, 480, 2);
-    this.spawnUnit('ROCKET_SOLDIER', 1090, 460, 2);
-    this.spawnUnit('MEDIUM_TANK', 1140, 460, 2);
+    // Nod Harvester for autonomous AI economy
+    this.spawnUnit('HARVESTER', 1560, 680, 2);
 
-    // Nod Base Garrison
-    this.spawnUnit('MEDIUM_TANK', 1300, 560, 2);
-    this.spawnUnit('MEDIUM_TANK', 1300, 630, 2);
-    this.spawnUnit('ROCKET_SOLDIER', 1250, 520, 2);
-    this.spawnUnit('LIGHT_INFANTRY', 1250, 580, 2);
+    // Forward Nod Patrol Squad
+    this.spawnUnit('LIGHT_INFANTRY', 1080, 440, 2);
+    this.spawnUnit('LIGHT_INFANTRY', 1080, 480, 2);
+    this.spawnUnit('ROCKET_SOLDIER', 1120, 460, 2);
+    this.spawnUnit('MEDIUM_TANK', 1165, 460, 2);
+
+    // Nod Base Staging Garrison
+    this.spawnUnit('MEDIUM_TANK', 1320, 560, 2);
+    this.spawnUnit('ROCKET_SOLDIER', 1280, 520, 2);
+    this.spawnUnit('LIGHT_INFANTRY', 1280, 580, 2);
   }
 
   public spawnUnit(type: UnitType, x: number, y: number, ownerId = 1): UnitEntity {
@@ -187,7 +233,6 @@ export class GameEngine {
 
     this.buildings.set(bldg.id, bldg);
 
-    // Free Harvester only for Player 1 when placing a Refinery
     if (type === 'REFINERY' && ownerId === 1) {
       const dock = this.getRefineryDockWorldPos(bldg);
       this.spawnUnit('HARVESTER', dock.x, dock.y + 24, ownerId);
@@ -209,6 +254,14 @@ export class GameEngine {
       consumed,
       isLowPower: consumed > produced,
     };
+  }
+
+  public hasActiveRadar(ownerId = 1): boolean {
+    const hasDome = Array.from(this.buildings.values()).some(
+      (b) => b.ownerId === ownerId && b.type === 'RADAR_DOME'
+    );
+    if (!hasDome) return false;
+    return !this.getPowerStats(ownerId).isLowPower;
   }
 
   public hasPrerequisites(itemType: BuildingType | UnitType, ownerId = 1): boolean {
@@ -316,6 +369,8 @@ export class GameEngine {
    * Advances simulation by 1 deterministic tick (50ms / 20 Hz).
    */
   public stepSimulationTick(): void {
+    if (this.matchStatus !== 'PLAYING') return;
+
     this.currentTick++;
 
     // 1. Snapshot previous positions for smooth 60+ FPS interpolation
@@ -334,20 +389,159 @@ export class GameEngine {
     // 3. Step Trickle-Drain Economy Queues
     this.updateProductionQueues();
 
-    // 4. Step Automated Harvester State Machine
+    // 4. Step Automated Harvester State Machine (Both GDI & Nod)
     this.updateHarvestersFSM();
 
-    // 5. Step Combat Target Acquisition, Turrets & Firing
+    // 5. Step Autonomous Brotherhood of Nod Skirmish AI
+    this.updateNodSkirmishAI();
+
+    // 6. Step Combat Target Acquisition, Turrets & Firing
     this.updateCombatSystem();
 
-    // 6. Step Ballistic Projectiles & Explosion Effects
+    // 7. Step Ballistic Projectiles & Explosion Effects
     this.updateProjectilesAndExplosions();
 
-    // 7. Step Unit Movement & Collision Separation
+    // 8. Step Unit Movement & Collision Separation
     this.updateUnitsMovement();
 
-    // 8. Recompute Two-Layer Fog of War
+    // 9. Recompute Two-Layer Fog of War & Check Match Victory/Defeat
     this.updateFogOfWar();
+    this.checkMatchOutcome();
+  }
+
+  // ============================================================================
+  // PHASE 4: AUTONOMOUS BROTHERHOOD OF NOD SKIRMISH AI
+  // ============================================================================
+  private updateNodSkirmishAI(): void {
+    // Give Nod a small passive Tiberium refinery trickle so AI remains active even if fields deplete
+    if (this.currentTick % 20 === 0) {
+      const hasNodRefinery = Array.from(this.buildings.values()).some(
+        (b) => b.ownerId === 2 && b.type === 'REFINERY'
+      );
+      if (hasNodRefinery) {
+        this.nodCredits += 35;
+      }
+    }
+
+    // 1. AI Base Construction & Production Check
+    this.aiProductionCooldown--;
+    if (this.aiProductionCooldown <= 0) {
+      this.aiProductionCooldown = 90; // Evaluate production every 4.5 seconds
+
+      const nodBuildings = Array.from(this.buildings.values()).filter((b) => b.ownerId === 2);
+      const hasConYard = nodBuildings.some((b) => b.type === 'CONSTRUCTION_YARD');
+      const hasBarracks = nodBuildings.some((b) => b.type === 'BARRACKS');
+      const hasWarFactory = nodBuildings.some((b) => b.type === 'WAR_FACTORY');
+
+      // Construct a Nod War Factory if ConYard exists and AI has funds
+      if (hasConYard && !hasWarFactory && this.nodCredits >= 1800) {
+        if (this.isTileClearForBuilding(29, 14) && this.isTileClearForBuilding(30, 14)) {
+          this.nodCredits -= 1800;
+          this.spawnBuilding('WAR_FACTORY', 29, 14, 2);
+        }
+      }
+
+      // Train Nod combat units and rally them at the forward staging area
+      const { TILE_SIZE } = GAME_CONFIG;
+      const rallyX = 24 * TILE_SIZE + ((this.currentTick % 5) - 2) * 25;
+      const rallyY = 12 * TILE_SIZE + ((this.currentTick % 3) - 1) * 30;
+
+      if (hasWarFactory && this.nodCredits >= 800) {
+        this.nodCredits -= 800;
+        const wf = nodBuildings.find((b) => b.type === 'WAR_FACTORY')!;
+        const tank = this.spawnUnit(
+          'MEDIUM_TANK',
+          wf.gridX * TILE_SIZE - 20,
+          (wf.gridY + 1) * TILE_SIZE,
+          2
+        );
+        tank.targetX = rallyX;
+        tank.targetY = rallyY;
+      } else if (hasBarracks && this.nodCredits >= 300) {
+        const trainRocket = this.currentTick % 2 === 0;
+        const uType: UnitType = trainRocket ? 'ROCKET_SOLDIER' : 'LIGHT_INFANTRY';
+        const cost = CATALOG[uType].cost;
+        this.nodCredits -= cost;
+        const bar = nodBuildings.find((b) => b.type === 'BARRACKS')!;
+        const inf = this.spawnUnit(
+          uType,
+          bar.gridX * TILE_SIZE - 18,
+          (bar.gridY + 1) * TILE_SIZE,
+          2
+        );
+        inf.targetX = rallyX;
+        inf.targetY = rallyY;
+      }
+    }
+
+    // 2. AI Timed Attack Wave Dispatcher
+    this.aiWaveCountdownTicks--;
+    if (this.aiWaveCountdownTicks <= 0) {
+      this.aiWaveCountdownTicks = GAME_CONFIG.AI_WAVE_INTERVAL_TICKS;
+      this.launchNodAttackWave();
+    }
+  }
+
+  private launchNodAttackWave(): void {
+    // Gather all combat-capable Nod units
+    const nodCombatUnits = Array.from(this.units.values()).filter(
+      (u) => u.ownerId === 2 && u.weapon !== null
+    );
+    if (nodCombatUnits.length < 2) return;
+
+    // Find primary GDI target coordinate (prefer GDI Construction Yard or any GDI building, else GDI unit)
+    let targetX = 420;
+    let targetY = 480;
+
+    const gdiBuildings = Array.from(this.buildings.values()).filter((b) => b.ownerId === 1);
+    const gdiUnits = Array.from(this.units.values()).filter((u) => u.ownerId === 1);
+
+    if (gdiBuildings.length > 0) {
+      const prio =
+        gdiBuildings.find((b) => b.type === 'CONSTRUCTION_YARD') ?? gdiBuildings[0];
+      const center = this.getBuildingCenterWorldPos(prio);
+      targetX = center.x;
+      targetY = center.y;
+    } else if (gdiUnits.length > 0) {
+      targetX = gdiUnits[0].x;
+      targetY = gdiUnits[0].y;
+    }
+
+    // Dispatch up to 5 Nod units on an Attack-Move order toward GDI
+    const waveUnits = nodCombatUnits.slice(0, 5);
+    this.executeMoveCommand(
+      waveUnits.map((u) => u.id),
+      targetX,
+      targetY,
+      true
+    );
+
+    this.lastCommandText = `WARNING: Nod assault wave (${waveUnits.length} units) advancing!`;
+    this.emitEvent({ evaSpeech: 'Warning. Nod attack wave detected.' });
+  }
+
+  private checkMatchOutcome(): void {
+    let gdiCount = 0;
+    let nodCount = 0;
+
+    for (const u of this.units.values()) {
+      if (u.ownerId === 1) gdiCount++;
+      else nodCount++;
+    }
+    for (const b of this.buildings.values()) {
+      if (b.ownerId === 1) gdiCount++;
+      else nodCount++;
+    }
+
+    if (nodCount === 0) {
+      this.matchStatus = 'VICTORY';
+      this.lastCommandText = 'MISSION ACCOMPLISHED — Sector Secured!';
+      this.emitEvent({ evaSpeech: 'Mission accomplished.' });
+    } else if (gdiCount === 0) {
+      this.matchStatus = 'DEFEAT';
+      this.lastCommandText = 'MISSION FAILED — GDI Forces Eliminated';
+      this.emitEvent({ evaSpeech: 'Mission failed.' });
+    }
   }
 
   private processCommandsForTick(tick: number): void {
@@ -359,13 +553,16 @@ export class GameEngine {
           case 'MOVE':
             this.executeMoveCommand(cmd.unitIds, cmd.targetX, cmd.targetY, false);
             this.lastCommandText = `MOVE (${cmd.unitIds.length}) -> [${Math.round(cmd.targetX)}, ${Math.round(cmd.targetY)}]`;
+            this.emitEvent({ sfx: 'ORDER_ACK' });
             break;
           case 'ATTACK_MOVE':
             this.executeMoveCommand(cmd.unitIds, cmd.targetX, cmd.targetY, true);
             this.lastCommandText = `ATTACK-MOVE (${cmd.unitIds.length}) -> [${Math.round(cmd.targetX)}, ${Math.round(cmd.targetY)}]`;
+            this.emitEvent({ sfx: 'ORDER_ACK' });
             break;
           case 'ATTACK':
             this.executeAttackCommand(cmd.unitIds, cmd.targetEntityId);
+            this.emitEvent({ sfx: 'ORDER_ACK' });
             break;
           case 'DEPLOY_MCV':
             this.executeDeployMcv(cmd.unitId);
@@ -381,6 +578,7 @@ export class GameEngine {
             break;
           case 'DIRECT_HARVESTER':
             this.executeDirectHarvester(cmd.unitIds, cmd.targetGridX, cmd.targetGridY, cmd.refineryId);
+            this.emitEvent({ sfx: 'ORDER_ACK' });
             break;
         }
       } else {
@@ -426,6 +624,7 @@ export class GameEngine {
     this.units.delete(mcv.id);
     this.spawnBuilding('CONSTRUCTION_YARD', gridX, gridY, mcv.ownerId);
     this.lastCommandText = 'MCV deployed into Construction Yard!';
+    this.emitEvent({ sfx: 'PLACE_BUILDING', evaSpeech: 'Construction yard deployed.' });
   }
 
   private executeStartProduction(itemType: BuildingType | UnitType): void {
@@ -450,10 +649,12 @@ export class GameEngine {
       if (this.buildingQueue) return;
       this.buildingQueue = prodItem;
       this.lastCommandText = `Constructing ${entry.name}...`;
+      this.emitEvent({ evaSpeech: 'Building.' });
     } else {
       if (this.unitQueue) return;
       this.unitQueue = prodItem;
       this.lastCommandText = `Training ${entry.name}...`;
+      this.emitEvent({ evaSpeech: 'Training.' });
     }
   }
 
@@ -462,10 +663,12 @@ export class GameEngine {
       this.credits += Math.round(this.buildingQueue.paidCost);
       this.buildingQueue = null;
       this.lastCommandText = 'Structure cancelled (Refunded)';
+      this.emitEvent({ evaSpeech: 'Cancelled.' });
     } else if (category === 'UNIT' && this.unitQueue) {
       this.credits += Math.round(this.unitQueue.paidCost);
       this.unitQueue = null;
       this.lastCommandText = 'Unit cancelled (Refunded)';
+      this.emitEvent({ evaSpeech: 'Cancelled.' });
     }
   }
 
@@ -482,6 +685,16 @@ export class GameEngine {
     this.spawnBuilding(bType, gridX, gridY, 1);
     this.buildingQueue = null;
     this.lastCommandText = `${CATALOG[bType].name} deployed!`;
+
+    const power = this.getPowerStats(1);
+    if (power.isLowPower && !this.wasLowPowerLastTick) {
+      this.emitEvent({ sfx: 'PLACE_BUILDING', evaSpeech: 'Low power.' });
+    } else if (bType === 'RADAR_DOME') {
+      this.emitEvent({ sfx: 'PLACE_BUILDING', evaSpeech: 'Radar online.' });
+    } else {
+      this.emitEvent({ sfx: 'PLACE_BUILDING' });
+    }
+    this.wasLowPowerLastTick = power.isLowPower;
   }
 
   private updateProductionQueues(): void {
@@ -516,6 +729,7 @@ export class GameEngine {
         q.readyToPlace = true;
         if (q.category === 'BUILDING') {
           this.lastCommandText = `${CATALOG[q.itemType].name} ready to place!`;
+          this.emitEvent({ evaSpeech: 'Construction complete.' });
         }
       }
     } else {
@@ -543,18 +757,17 @@ export class GameEngine {
     unit.targetX = spawnX + ((this.currentTick % 3) - 1) * 28;
     unit.targetY = spawnY + 38;
     this.lastCommandText = `${CATALOG[uType].name} ready!`;
+    this.emitEvent({ evaSpeech: 'Unit ready.' });
   }
 
   // ============================================================================
-  // PHASE 3: COMBAT, TURRET ROTATION, PROJECTILES & ARMOR MATRIX
+  // COMBAT, TURRET ROTATION, PROJECTILES & ARMOR MATRIX
   // ============================================================================
   private updateCombatSystem(): void {
-    // 1. Armed Units Combat Step
     for (const unit of this.units.values()) {
       if (!unit.weapon) continue;
       if (unit.attackCooldown > 0) unit.attackCooldown--;
 
-      // Validate existing target
       if (unit.targetEntityId !== null) {
         const targetInfo = this.getEntityWorldPos(unit.targetEntityId);
         if (!targetInfo || targetInfo.ownerId === unit.ownerId) {
@@ -562,7 +775,6 @@ export class GameEngine {
         }
       }
 
-      // Auto-acquire nearest hostile if idle or on Attack-Move
       const isIdle = unit.targetX === null && unit.targetY === null;
       if (unit.targetEntityId === null && (isIdle || unit.isAttackMove)) {
         const nearestEnemyId = this.findNearestHostileInRange(
@@ -576,7 +788,6 @@ export class GameEngine {
         }
       }
 
-      // Engage active target
       if (unit.targetEntityId !== null) {
         const targetInfo = this.getEntityWorldPos(unit.targetEntityId);
         if (targetInfo) {
@@ -586,7 +797,6 @@ export class GameEngine {
           const effectiveRange = unit.weapon.range + targetInfo.radius;
 
           if (dist <= effectiveRange) {
-            // In weapon range: halt movement, rotate turret toward target, and fire
             unit.targetX = null;
             unit.targetY = null;
 
@@ -606,24 +816,20 @@ export class GameEngine {
               unit.attackCooldown = unit.weapon.cooldownTicks;
             }
           } else {
-            // Out of weapon range: chase target
             unit.targetX = targetInfo.x;
             unit.targetY = targetInfo.y;
           }
         }
       } else if (unit.isAttackMove && unit.attackMoveDestX !== null && unit.attackMoveDestY !== null) {
-        // Resume Attack-Move march after clearing target
         unit.targetX = unit.attackMoveDestX;
         unit.targetY = unit.attackMoveDestY;
       }
     }
 
-    // 2. Defensive Structures (Guard Towers) Combat Step
     for (const bldg of this.buildings.values()) {
       if (!bldg.weapon) continue;
 
       const { isLowPower } = this.getPowerStats(bldg.ownerId);
-      // Low power halves turret cooldown recovery speed
       if (bldg.attackCooldown > 0 && (!isLowPower || this.currentTick % 2 === 0)) {
         bldg.attackCooldown--;
       }
@@ -698,11 +904,19 @@ export class GameEngine {
       speed: weapon.projectileSpeed,
     };
     this.projectiles.set(proj.id, proj);
+
+    if (this.isWorldPosVisibleToPlayer(startX, startY)) {
+      const sfxMap = {
+        BULLET: 'SHOOT_BULLET',
+        SHELL: 'SHOOT_SHELL',
+        ROCKET: 'SHOOT_ROCKET',
+      } as const;
+      this.emitEvent({ sfx: sfxMap[weapon.projectileStyle] });
+    }
   }
 
   private updateProjectilesAndExplosions(): void {
     for (const [id, proj] of this.projectiles.entries()) {
-      // Homing update for guided rockets or tracking live target coordinates
       if (proj.targetEntityId !== null) {
         const liveTarget = this.getEntityWorldPos(proj.targetEntityId);
         if (liveTarget) {
@@ -716,7 +930,6 @@ export class GameEngine {
       const dist = Math.hypot(dx, dy);
 
       if (dist <= proj.speed) {
-        // Impact!
         this.applyProjectileImpact(proj);
         this.projectiles.delete(id);
       } else {
@@ -725,7 +938,6 @@ export class GameEngine {
       }
     }
 
-    // Step visual explosion timers
     this.explosions = this.explosions.filter((exp) => {
       exp.currentTick++;
       return exp.currentTick < exp.totalTicks;
@@ -733,7 +945,6 @@ export class GameEngine {
   }
 
   private applyProjectileImpact(proj: ProjectileEntity): void {
-    // Spawn impact explosion effect
     const blastRadius = proj.style === 'BULLET' ? 7 : proj.style === 'ROCKET' ? 18 : 22;
     const blastColor = proj.style === 'BULLET' ? 0xffee77 : 0xff7733;
     this.explosions.push({
@@ -763,6 +974,9 @@ export class GameEngine {
           totalTicks: 10,
           color: 0xff4422,
         });
+        if (this.isWorldPosVisibleToPlayer(targetUnit.x, targetUnit.y)) {
+          this.emitEvent({ sfx: 'EXPLOSION' });
+        }
       }
       return;
     }
@@ -783,6 +997,7 @@ export class GameEngine {
           totalTicks: 12,
           color: 0xff3311,
         });
+        this.emitEvent({ sfx: 'EXPLOSION' });
       }
     }
   }
@@ -803,7 +1018,6 @@ export class GameEngine {
 
     for (const u of this.units.values()) {
       if (u.ownerId === ownerId) continue;
-      // Player 1 units only auto-acquire enemies currently visible in Fog of War
       if (ownerId === 1 && !this.isWorldPosVisibleToPlayer(u.x, u.y)) continue;
 
       const d = Math.hypot(u.x - x, u.y - y) - u.radius;
@@ -867,12 +1081,11 @@ export class GameEngine {
   }
 
   // ============================================================================
-  // PHASE 3: TWO-LAYER FOG OF WAR (SHROUD & EXPLORED FOG)
+  // TWO-LAYER FOG OF WAR
   // ============================================================================
   public updateFogOfWar(): void {
     const { MAP_ROWS, MAP_COLS, TILE_SIZE } = GAME_CONFIG;
 
-    // 1. Downgrade currently VISIBLE (2) tiles to EXPLORED FOG (1)
     for (let r = 0; r < MAP_ROWS; r++) {
       for (let c = 0; c < MAP_COLS; c++) {
         if (this.fogGrid[r][c] === 2) {
@@ -881,7 +1094,6 @@ export class GameEngine {
       }
     }
 
-    // 2. Reveal tiles within sightRangeTiles of all Player 1 units & buildings
     for (const u of this.units.values()) {
       if (u.ownerId !== 1) continue;
       const gx = Math.floor(u.x / TILE_SIZE);
@@ -1018,6 +1230,9 @@ export class GameEngine {
             if (unit.ownerId === 1) {
               this.credits += unit.tiberiumLoad;
               this.lastCommandText = `Harvester unloaded +$${unit.tiberiumLoad} credits`;
+              this.emitEvent({ sfx: 'CREDITS_UNLOAD' });
+            } else {
+              this.nodCredits += unit.tiberiumLoad;
             }
             unit.tiberiumLoad = 0;
             unit.harvesterState = 'IDLE';

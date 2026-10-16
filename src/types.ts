@@ -24,29 +24,42 @@ export type HarvesterState =
 export type ArmorType = 'NONE' | 'LIGHT' | 'HEAVY';
 export type WarheadType = 'SA' | 'AP' | 'HE';
 export type ProjectileStyle = 'BULLET' | 'SHELL' | 'ROCKET';
+export type MatchStatus = 'PLAYING' | 'VICTORY' | 'DEFEAT';
 
-// Classic C&C Armor vs. Warhead Multiplier Table
+export type SfxType =
+  | 'SHOOT_BULLET'
+  | 'SHOOT_SHELL'
+  | 'SHOOT_ROCKET'
+  | 'EXPLOSION'
+  | 'PLACE_BUILDING'
+  | 'CREDITS_UNLOAD'
+  | 'ORDER_ACK';
+
+export interface GameEvent {
+  sfx?: SfxType;
+  evaSpeech?: string;
+}
+
 export const DAMAGE_MATRIX: Record<WarheadType, Record<ArmorType, number>> = {
-  SA: { NONE: 1.0, LIGHT: 0.55, HEAVY: 0.25 }, // Small Arms: shreds infantry, weak vs tanks
-  AP: { NONE: 0.35, LIGHT: 0.85, HEAVY: 1.0 }, // Armor Piercing: shreds tanks & buildings
-  HE: { NONE: 0.9, LIGHT: 0.8, HEAVY: 0.65 },  // High Explosive: balanced splash
+  SA: { NONE: 1.0, LIGHT: 0.55, HEAVY: 0.25 },
+  AP: { NONE: 0.35, LIGHT: 0.85, HEAVY: 1.0 },
+  HE: { NONE: 0.9, LIGHT: 0.8, HEAVY: 0.65 },
 };
 
 export interface WeaponSpec {
   damage: number;
-  range: number; // World pixels
-  cooldownTicks: number; // Ticks between shots at 20Hz
+  range: number;
+  cooldownTicks: number;
   warhead: WarheadType;
-  projectileSpeed: number; // World pixels per tick
+  projectileSpeed: number;
   projectileStyle: ProjectileStyle;
 }
 
 export interface UnitEntity {
   id: number;
   type: UnitType;
-  ownerId: number; // 1 = GDI (Player), 2 = Brotherhood of Nod (Enemy)
+  ownerId: number; // 1 = GDI (Player), 2 = Brotherhood of Nod (AI)
 
-  // Current & previous tick coordinates for 60+ FPS interpolation
   x: number;
   y: number;
   prevX: number;
@@ -66,14 +79,12 @@ export interface UnitEntity {
   sightRangeTiles: number;
   selected: boolean;
 
-  // Phase 2 Harvester FSM fields
   harvesterState?: HarvesterState;
   tiberiumLoad: number;
   maxTiberiumLoad: number;
   stateTimer: number;
   targetRefineryId: number | null;
 
-  // Phase 3 Combat fields
   weapon: WeaponSpec | null;
   attackCooldown: number;
   targetEntityId: number | null;
@@ -99,7 +110,6 @@ export interface BuildingEntity {
   powerConsumed: number;
   selected: boolean;
 
-  // Phase 3 Defensive Turret fields (e.g. Guard Tower)
   weapon: WeaponSpec | null;
   attackCooldown: number;
   targetEntityId: number | null;
@@ -132,7 +142,7 @@ export interface ExplosionEffect {
   color: number;
 }
 
-export type VisibilityState = 0 | 1 | 2; // 0 = Unexplored Shroud, 1 = Explored Fog, 2 = Visible
+export type VisibilityState = 0 | 1 | 2;
 
 export interface ProductionItem {
   category: 'BUILDING' | 'UNIT';
@@ -357,7 +367,6 @@ export const CATALOG: Record<BuildingType | UnitType, CatalogEntry> = {
   },
 };
 
-// Serializable Deterministic Commands
 export interface MoveCommand {
   tick: number;
   type: 'MOVE';
@@ -438,6 +447,7 @@ export const GAME_CONFIG = {
   MAP_COLS: 40,
   MAP_ROWS: 40,
   BASE_ADJACENCY_TILES: 7,
+  AI_WAVE_INTERVAL_TICKS: 900, // 45 seconds per Nod assault wave
 };
 
 type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;

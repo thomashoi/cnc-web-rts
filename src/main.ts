@@ -1,4 +1,5 @@
 import { Application, Container, Graphics } from 'pixi.js';
+import { AudioSystem } from './AudioSystem';
 import { GameEngine } from './GameEngine';
 import {
   BuildingType,
@@ -24,6 +25,7 @@ async function bootstrap() {
   app.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   const engine = new GameEngine();
+  const audio = new AudioSystem();
 
   // Scene Graph Layers
   const worldContainer = new Container();
@@ -104,6 +106,161 @@ async function bootstrap() {
   }
 
   // ============================================================================
+  // INTERACTIVE RADAR MINIMAP SETUP
+  // ============================================================================
+  const radarCanvas = document.getElementById('radar-canvas') as HTMLCanvasElement;
+  const radarCtx = radarCanvas.getContext('2d')!;
+  const radarStatusTag = document.getElementById('radar-status-tag')!;
+  let isDraggingRadar = false;
+
+  radarCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  function jumpCameraToRadarPoint(clientX: number, clientY: number): void {
+    const rect = radarCanvas.getBoundingClientRect();
+    const rx = (clientX - rect.left) / rect.width;
+    const ry = (clientY - rect.top) / rect.height;
+
+    const worldW = GAME_CONFIG.MAP_COLS * GAME_CONFIG.TILE_SIZE;
+    const worldH = GAME_CONFIG.MAP_ROWS * GAME_CONFIG.TILE_SIZE;
+    const targetWorldX = rx * worldW;
+    const targetWorldY = ry * worldH;
+
+    camera.x = app.screen.width / 2 - targetWorldX * camera.zoom;
+    camera.y = app.screen.height / 2 - targetWorldY * camera.zoom;
+  }
+
+  radarCanvas.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (e.button === 0) {
+      isDraggingRadar = true;
+      jumpCameraToRadarPoint(e.clientX, e.clientY);
+    } else if (e.button === 2) {
+      // Right-click on Minimap issues MOVE / ATTACK_MOVE to selected units
+      const rect = radarCanvas.getBoundingClientRect();
+      const rx = (e.clientX - rect.left) / rect.width;
+      const ry = (e.clientY - rect.top) / rect.height;
+      const worldW = GAME_CONFIG.MAP_COLS * GAME_CONFIG.TILE_SIZE;
+      const worldH = GAME_CONFIG.MAP_ROWS * GAME_CONFIG.TILE_SIZE;
+      const wx = rx * worldW;
+      const wy = ry * worldH;
+
+      const selectedIds = Array.from(engine.units.values())
+        .filter((u) => u.ownerId === 1 && u.selected)
+        .map((u) => u.id);
+
+      if (selectedIds.length > 0) {
+        engine.issueCommand({
+          type: isAttackMoveMode ? 'ATTACK_MOVE' : 'MOVE',
+          unitIds: selectedIds,
+          targetX: wx,
+          targetY: wy,
+        });
+        orderMarker = {
+          x: wx,
+          y: wy,
+          alpha: 1.0,
+          color: isAttackMoveMode ? 0xff4444 : 0x55ff77,
+        };
+        isAttackMoveMode = false;
+      }
+    }
+  });
+
+  window.addEventListener('pointermove', (e: PointerEvent) => {
+    if (isDraggingRadar) {
+      jumpCameraToRadarPoint(e.clientX, e.clientY);
+    }
+  });
+
+  window.addEventListener('pointerup', () => {
+    isDraggingRadar = false;
+  });
+
+  function renderRadarMinimap(): void {
+    const cw = radarCanvas.width;
+    const ch = radarCanvas.height;
+    const { MAP_COLS, MAP_ROWS, TILE_SIZE } = GAME_CONFIG;
+    const tileW = cw / MAP_COLS;
+    const tileH = ch / MAP_ROWS;
+    const hasRadarSweep = engine.hasActiveRadar(1);
+
+    radarStatusTag.textContent = hasRadarSweep ? 'DOME SWEEP ACTIVE' : 'LOCAL SENSORS';
+    radarStatusTag.style.color = hasRadarSweep ? '#55ff77' : '#ffdd44';
+
+    // 1. Base background
+    radarCtx.fillStyle = '#121812';
+    radarCtx.fillRect(0, 0, cw, ch);
+
+    // 2. Terrain & Fog of War tiles
+    for (let r = 0; r < MAP_ROWS; r++) {
+      for (let c = 0; c < MAP_COLS; c++) {
+        const vis = engine.fogEnabled ? engine.fogGrid[r][c] : 2;
+        if (vis === 0 && !hasRadarSweep) {
+          radarCtx.fillStyle = '#040604';
+        } else if (vis === 1) {
+          radarCtx.fillStyle = '#141a13';
+        } else {
+          radarCtx.fillStyle = '#222b1f';
+        }
+        radarCtx.fillRect(c * tileW, r * tileH, tileW + 0.5, tileH + 0.5);
+      }
+    }
+
+    // 3. Tiberium patches
+    radarCtx.fillStyle = '#2ee65f';
+    for (const p of engine.tiberiumPatches) {
+      if (p.amount <= 0) continue;
+      if (engine.fogEnabled && engine.fogGrid[p.gridY][p.gridX] === 0 && !hasRadarSweep) continue;
+      radarCtx.fillRect(p.gridX * tileW, p.gridY * tileH, tileW, tileH);
+    }
+
+    // 4. Structures
+    for (const b of engine.buildings.values()) {
+      if (
+        b.ownerId !== 1 &&
+        engine.fogEnabled &&
+        engine.fogGrid[b.gridY][b.gridX] === 0 &&
+        !hasRadarSweep
+      ) {
+        continue;
+      }
+      radarCtx.fillStyle = b.ownerId === 1 ? '#e6c34a' : '#ff3b3b';
+      radarCtx.fillRect(
+        b.gridX * tileW,
+        b.gridY * tileH,
+        b.widthTiles * tileW,
+        b.heightTiles * tileH
+      );
+    }
+
+    // 5. Mobile Units
+    const worldW = MAP_COLS * TILE_SIZE;
+    const worldH = MAP_ROWS * TILE_SIZE;
+    for (const u of engine.units.values()) {
+      if (
+        u.ownerId !== 1 &&
+        !engine.isWorldPosVisibleToPlayer(u.x, u.y) &&
+        !hasRadarSweep
+      ) {
+        continue;
+      }
+      radarCtx.fillStyle = u.ownerId === 1 ? '#55ff77' : '#ff4444';
+      const ux = (u.x / worldW) * cw;
+      const uy = (u.y / worldH) * ch;
+      radarCtx.fillRect(ux - 1.5, uy - 1.5, 3, 3);
+    }
+
+    // 6. Camera Viewport Box
+    const camLeft = (-camera.x / camera.zoom / worldW) * cw;
+    const camTop = (-camera.y / camera.zoom / worldH) * ch;
+    const camW = (app.screen.width / camera.zoom / worldW) * cw;
+    const camH = (app.screen.height / camera.zoom / worldH) * ch;
+
+    radarCtx.strokeStyle = '#ffffff';
+    radarCtx.lineWidth = 1.2;
+    radarCtx.strokeRect(camLeft, camTop, camW, camH);
+  }
+
+  // ============================================================================
   // SIDEBAR UI INITIALIZATION
   // ============================================================================
   const structureTypes: BuildingType[] = [
@@ -127,9 +284,14 @@ async function bootstrap() {
   const btnDeployMcv = document.getElementById('btn-deploy-mcv') as HTMLButtonElement;
   const btnAttackMove = document.getElementById('btn-attack-move') as HTMLButtonElement;
   const btnToggleFog = document.getElementById('btn-toggle-fog') as HTMLButtonElement;
+  const btnToggleAudio = document.getElementById('btn-toggle-audio') as HTMLButtonElement;
   const btnCancelBldg = document.getElementById('btn-cancel-bldg') as HTMLButtonElement;
   const btnCancelUnit = document.getElementById('btn-cancel-unit') as HTMLButtonElement;
   const modeBanner = document.getElementById('mode-banner')!;
+  const matchOverlay = document.getElementById('match-overlay')!;
+  const matchTitle = document.getElementById('match-title')!;
+  const matchSubtitle = document.getElementById('match-subtitle')!;
+  const btnRestart = document.getElementById('btn-restart') as HTMLButtonElement;
 
   const cardElements: Map<BuildingType | UnitType, HTMLDivElement> = new Map();
 
@@ -189,7 +351,12 @@ async function bootstrap() {
 
   btnToggleFog.addEventListener('click', () => {
     engine.fogEnabled = !engine.fogEnabled;
-    btnToggleFog.textContent = `FOG OF WAR: ${engine.fogEnabled ? 'ON' : 'OFF'} [F]`;
+    btnToggleFog.textContent = `FOG: ${engine.fogEnabled ? 'ON' : 'OFF'} [F]`;
+  });
+
+  btnToggleAudio.addEventListener('click', () => {
+    audio.enabled = !audio.enabled;
+    btnToggleAudio.textContent = `AUDIO: ${audio.enabled ? 'ON' : 'OFF'} [M]`;
   });
 
   btnCancelBldg.addEventListener('click', () => {
@@ -201,7 +368,13 @@ async function bootstrap() {
     engine.issueCommand({ type: 'CANCEL_PRODUCTION', category: 'UNIT' });
   });
 
-  // Helper: Find hostile entity under world coordinates
+  btnRestart.addEventListener('click', () => {
+    engine.resetMatch();
+    camera.x = -110;
+    camera.y = -120;
+    matchOverlay.style.display = 'none';
+  });
+
   function findHostileAtWorldPos(wx: number, wy: number): number | null {
     for (const u of engine.units.values()) {
       if (u.ownerId === 1) continue;
@@ -250,7 +423,6 @@ async function bootstrap() {
     const worldPos = screenToWorld(sx, sy);
 
     if (e.button === 0) {
-      // 1. Building Placement Mode
       if (isPlacementMode && engine.buildingQueue?.readyToPlace) {
         const bType = engine.buildingQueue.itemType as BuildingType;
         const entry = CATALOG[bType];
@@ -267,7 +439,6 @@ async function bootstrap() {
         return;
       }
 
-      // 2. Attack-Move Mode [A + Left-Click]
       if (isAttackMoveMode) {
         const selectedIds = Array.from(engine.units.values())
           .filter((u) => u.ownerId === 1 && u.selected)
@@ -285,7 +456,6 @@ async function bootstrap() {
         return;
       }
 
-      // 3. Standard Box Selection
       selectionBox.active = true;
       selectionBox.startX = sx;
       selectionBox.startY = sy;
@@ -307,7 +477,6 @@ async function bootstrap() {
       );
       if (selectedUnits.length === 0) return;
 
-      // 1. Check if Right-Clicking a Hostile Unit or Building -> Issue ATTACK Command
       const hostileId = findHostileAtWorldPos(worldPos.x, worldPos.y);
       if (hostileId !== null) {
         engine.issueCommand({
@@ -319,7 +488,6 @@ async function bootstrap() {
         return;
       }
 
-      // 2. Check if Right-Clicking Refinery or Tiberium with Harvesters
       const { TILE_SIZE } = GAME_CONFIG;
       const clickedGX = Math.floor(worldPos.x / TILE_SIZE);
       const clickedGY = Math.floor(worldPos.y / TILE_SIZE);
@@ -363,7 +531,6 @@ async function bootstrap() {
         }
       }
 
-      // 3. Standard Move Command
       engine.issueCommand({
         type: 'MOVE',
         unitIds: selectedUnits.map((u) => u.id),
@@ -438,7 +605,6 @@ async function bootstrap() {
     keysPressed.add(key);
 
     if (key === 'd' && !e.ctrlKey && !e.metaKey) {
-      // Only deploy MCV if 'D' is pressed while an MCV is selected and not panning
       const selectedMcv = Array.from(engine.units.values()).find(
         (u) => u.ownerId === 1 && u.selected && u.type === 'MCV'
       );
@@ -455,7 +621,10 @@ async function bootstrap() {
       }
     } else if (key === 'f' && !e.ctrlKey && !e.metaKey) {
       engine.fogEnabled = !engine.fogEnabled;
-      btnToggleFog.textContent = `FOG OF WAR: ${engine.fogEnabled ? 'ON' : 'OFF'} [F]`;
+      btnToggleFog.textContent = `FOG: ${engine.fogEnabled ? 'ON' : 'OFF'} [F]`;
+    } else if (key === 'm' && !e.ctrlKey && !e.metaKey) {
+      audio.enabled = !audio.enabled;
+      btnToggleAudio.textContent = `AUDIO: ${audio.enabled ? 'ON' : 'OFF'} [M]`;
     } else if (key === 'escape') {
       isPlacementMode = false;
       isAttackMoveMode = false;
@@ -486,7 +655,7 @@ async function bootstrap() {
   });
 
   // ============================================================================
-  // RENDERING HELPERS (TIBERIUM, STRUCTURES, UNITS, PROJECTILES, FOG OF WAR)
+  // RENDERING HELPERS
   // ============================================================================
   function drawTiberiumPatches(): void {
     tiberiumGraphics.clear();
@@ -512,7 +681,6 @@ async function bootstrap() {
     const { TILE_SIZE } = GAME_CONFIG;
 
     for (const b of engine.buildings.values()) {
-      // Hide unexplored enemy structures under Black Shroud
       if (
         b.ownerId !== 1 &&
         engine.fogEnabled &&
@@ -570,7 +738,6 @@ async function bootstrap() {
           .stroke({ width: 2, color: 0x55ff77 });
       }
 
-      // Building HP Bar
       const hpRatio = Math.max(0, b.hp / b.maxHp);
       buildingGraphics.rect(x + 6, y - 7, w - 12, 4).fill({ color: 0x111111 });
       buildingGraphics
@@ -580,7 +747,6 @@ async function bootstrap() {
   }
 
   function drawUnit(unit: UnitEntity, rx: number, ry: number): void {
-    // Enemy mobile units are only rendered if inside currently VISIBLE (2) tiles
     if (unit.ownerId !== 1 && !engine.isWorldPosVisibleToPlayer(unit.x, unit.y)) {
       return;
     }
@@ -590,7 +756,6 @@ async function bootstrap() {
     const hullColor = isGDI ? 0xd9a74a : 0xd93b3b;
     const turretColor = isGDI ? 0xb8862d : 0x992222;
 
-    // Target or Waypoint Line when Selected
     if (unit.selected) {
       if (unit.targetEntityId !== null) {
         const tPos = engine.getEntityWorldPos(unit.targetEntityId);
@@ -634,7 +799,7 @@ async function bootstrap() {
     } else if (unit.type === 'HARVESTER') {
       unitGraphics
         .rect(rx - r, ry - r * 0.85, r * 2, r * 1.7)
-        .fill({ color: 0xe6b800 })
+        .fill({ color: isGDI ? 0xe6b800 : 0xb83232 })
         .stroke({ width: 2, color: 0x1f1f1f });
 
       const pips = 5;
@@ -652,7 +817,6 @@ async function bootstrap() {
       unitGraphics.circle(rx, ry, r * 0.5).fill({ color: 0x55ff77 });
     }
 
-    // Selection Brackets or Enemy Health Bar
     if (unit.selected || !isGDI) {
       const b = r + 5;
       if (unit.selected) {
@@ -705,12 +869,10 @@ async function bootstrap() {
       for (let c = 0; c < MAP_COLS; c++) {
         const state = engine.fogGrid[r][c];
         if (state === 0) {
-          // Unexplored Black Shroud
           fogGraphics
             .rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
             .fill({ color: 0x050705, alpha: 0.96 });
         } else if (state === 1) {
-          // Explored Dimmed Fog
           fogGraphics
             .rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
             .fill({ color: 0x080c08, alpha: 0.55 });
@@ -724,7 +886,7 @@ async function bootstrap() {
 
     if (isAttackMoveMode) {
       modeBanner.style.display = 'block';
-      modeBanner.textContent = 'ATTACK-MOVE MODE: Left-Click Destination | Right-Click to Cancel';
+      modeBanner.textContent = 'ATTACK-MOVE MODE: Left-Click Map or Radar | Right-Click to Cancel';
       return;
     }
 
@@ -754,8 +916,8 @@ async function bootstrap() {
     }
 
     const worldPos = screenToWorld(mouseScreen.x, mouseScreen.y);
-    const gx = Math.floor(worldPos.x / TILE_SIZE - w / 2 + 0.5);
-    const gy = Math.floor(worldPos.y / TILE_SIZE - h / 2 + 0.5);
+    const gx = Math.floor(worldPos.x / GAME_CONFIG.TILE_SIZE - w / 2 + 0.5);
+    const gy = Math.floor(worldPos.y / GAME_CONFIG.TILE_SIZE - h / 2 + 0.5);
     const check = engine.validateBuildingPlacement(bType, gx, gy);
 
     for (let dy = 0; dy < h; dy++) {
@@ -771,11 +933,12 @@ async function bootstrap() {
     }
   }
 
-  // DOM Elements for Telemetry & Sidebar Updates
+  // DOM Elements
   const elTick = document.getElementById('stat-tick')!;
   const elSelected = document.getElementById('stat-selected')!;
   const elHarvesters = document.getElementById('stat-harvesters')!;
   const elEnemies = document.getElementById('stat-enemies')!;
+  const elWave = document.getElementById('stat-wave')!;
   const elCmd = document.getElementById('stat-cmd')!;
   const elCredits = document.getElementById('stat-credits')!;
   const elEconRate = document.getElementById('stat-econ-rate')!;
@@ -864,6 +1027,22 @@ async function bootstrap() {
       elStatusUnit.textContent = 'Idle';
       elProgUnit.style.width = '0%';
     }
+
+    // Victory / Defeat Overlay
+    if (engine.matchStatus !== 'PLAYING') {
+      matchOverlay.style.display = 'flex';
+      if (engine.matchStatus === 'VICTORY') {
+        matchTitle.textContent = 'GDI MISSION ACCOMPLISHED';
+        matchTitle.style.color = '#55ff77';
+        matchSubtitle.textContent =
+          'All Brotherhood of Nod structures and forces in this sector have been neutralized.';
+      } else {
+        matchTitle.textContent = 'BROTHERHOOD OF NOD VICTORY';
+        matchTitle.style.color = '#ff4444';
+        matchSubtitle.textContent =
+          'Your GDI expeditionary force was wiped out. Re-deploy and secure your perimeter early!';
+      }
+    }
   }
 
   // ============================================================================
@@ -883,7 +1062,13 @@ async function bootstrap() {
       accumulator -= GAME_CONFIG.TICK_MS;
     }
 
-    // Camera Panning via Arrow Keys or WASD (when not issuing hotkeys)
+    // Process synthesized audio & EVA events emitted during simulation ticks
+    for (const ev of engine.consumeEvents()) {
+      if (ev.sfx) audio.playSfx(ev.sfx);
+      if (ev.evaSpeech) audio.speakEva(ev.evaSpeech);
+    }
+
+    // Camera Panning
     if (keysPressed.has('w') || keysPressed.has('arrowup')) camera.y += camera.panSpeed;
     if (keysPressed.has('s') || keysPressed.has('arrowdown')) camera.y -= camera.panSpeed;
     if (keysPressed.has('a') || keysPressed.has('arrowleft')) camera.x += camera.panSpeed;
@@ -930,6 +1115,7 @@ async function bootstrap() {
     drawProjectilesAndExplosions(alpha);
     drawFogOfWar();
     drawPlacementPreview();
+    renderRadarMinimap();
 
     uiOverlayGraphics.clear();
     if (selectionBox.active) {
@@ -943,10 +1129,12 @@ async function bootstrap() {
         .stroke({ width: 1.5, color: 0x55ff77 });
     }
 
+    const waveSeconds = Math.ceil(engine.aiWaveCountdownTicks / GAME_CONFIG.TICK_RATE);
     elTick.textContent = String(engine.currentTick);
     elSelected.textContent = String(selectedCount);
     elHarvesters.textContent = String(harvesterCount);
-    elEnemies.textContent = nodCount > 0 ? String(nodCount) : 'SECTOR CLEAR (VICTORY!)';
+    elEnemies.textContent = String(nodCount);
+    elWave.textContent = `Next Wave: ${waveSeconds}s`;
     elCmd.textContent = engine.lastCommandText;
     syncSidebarUI();
   });
