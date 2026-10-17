@@ -96,26 +96,31 @@ export class GameEngine {
   }
 
   private seedInitialMap(): void {
-    // 1. Spawn Player (GDI - Owner 1) Strike Force on the West
     // 1. Spawn Player (GDI - Owner 1) Strike Force in Top-Left Corner
-    this.spawnUnit('MCV', 216, 216, 1);
-    this.spawnUnit('HARVESTER', 300, 240, 1);
+    // MCV placed deep in top-left base zone
+    this.spawnUnit('MCV', 180, 180, 1);
 
-    this.spawnUnit('MEDIUM_TANK', 320, 160, 1);
-    this.spawnUnit('MEDIUM_TANK', 380, 220, 1);
-    this.spawnUnit('MEDIUM_TANK', 300, 320, 1);
+    // Harvester placed on a dedicated open southern harvesting lane (Y > 300)
+    // completely clear of all combat units
+    this.spawnUnit('HARVESTER', 240, 350, 1);
 
-    this.spawnUnit('ROCKET_SOLDIER', 380, 290, 1);
-    this.spawnUnit('ROCKET_SOLDIER', 320, 380, 1);
+    // Perimeter Defense Strike Force: spaced out in an East-facing defensive line
+    // with wide clearance (> 50px between each unit) and strictly above Y <= 270
+    this.spawnUnit('MEDIUM_TANK', 480, 120, 1);
+    this.spawnUnit('MEDIUM_TANK', 540, 190, 1);
+    this.spawnUnit('MEDIUM_TANK', 560, 270, 1);
 
-    this.spawnUnit('LIGHT_INFANTRY', 420, 170, 1);
-    this.spawnUnit('LIGHT_INFANTRY', 440, 220, 1);
-    this.spawnUnit('LIGHT_INFANTRY', 410, 310, 1);
-    this.spawnUnit('LIGHT_INFANTRY', 360, 390, 1);
+    this.spawnUnit('ROCKET_SOLDIER', 420, 110, 1);
+    this.spawnUnit('ROCKET_SOLDIER', 470, 220, 1);
+
+    this.spawnUnit('LIGHT_INFANTRY', 360, 110, 1);
+    this.spawnUnit('LIGHT_INFANTRY', 410, 160, 1);
+    this.spawnUnit('LIGHT_INFANTRY', 460, 170, 1);
+    this.spawnUnit('LIGHT_INFANTRY', 510, 230, 1);
 
     // 2. Seed Tiberium Crystal Fields (Top-Left GDI + Center Contested + Bottom-Right Nod)
     const patchCenters = [
-      { cx: 8, cy: 9 },   // GDI top-left Tiberium field
+      { cx: 8, cy: 9 },   // GDI top-left Tiberium field (grid 6..10, 7..11)
       { cx: 20, cy: 20 }, // Central contested Tiberium field
       { cx: 31, cy: 24 }, // Nod bottom-right Tiberium field
     ];
@@ -141,19 +146,19 @@ export class GameEngine {
     this.spawnBuilding('GUARD_TOWER', 32, 27, 2); // North defense
     this.spawnBuilding('GUARD_TOWER', 26, 33, 2); // West defense
 
-    // Nod Harvester for autonomous AI economy
-    this.spawnUnit('HARVESTER', 1512, 1540, 2);
+    // Nod Harvester spawned in its open corridor facing north toward Tiberium
+    this.spawnUnit('HARVESTER', 1512, 1400, 2);
 
     // Forward Nod Patrol Squad (holding Northwest approach to Nod base)
     this.spawnUnit('LIGHT_INFANTRY', 1150, 1180, 2);
-    this.spawnUnit('LIGHT_INFANTRY', 1190, 1220, 2);
-    this.spawnUnit('ROCKET_SOLDIER', 1130, 1230, 2);
-    this.spawnUnit('MEDIUM_TANK', 1100, 1160, 2);
+    this.spawnUnit('LIGHT_INFANTRY', 1220, 1220, 2);
+    this.spawnUnit('ROCKET_SOLDIER', 1140, 1280, 2);
+    this.spawnUnit('MEDIUM_TANK', 1080, 1160, 2);
 
-    // Nod Base Staging Garrison (protecting Bottom-Right structures)
-    this.spawnUnit('MEDIUM_TANK', 1500, 1580, 2);
-    this.spawnUnit('ROCKET_SOLDIER', 1580, 1480, 2);
-    this.spawnUnit('LIGHT_INFANTRY', 1460, 1450, 2);
+    // Nod Base Staging Garrison: spaced out to the East away from the harvester lane
+    this.spawnUnit('MEDIUM_TANK', 1650, 1580, 2);
+    this.spawnUnit('ROCKET_SOLDIER', 1650, 1480, 2);
+    this.spawnUnit('LIGHT_INFANTRY', 1640, 1400, 2);
   }
 
   public spawnUnit(type: UnitType, x: number, y: number, ownerId = 1): UnitEntity {
