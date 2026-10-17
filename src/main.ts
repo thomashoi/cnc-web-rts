@@ -987,8 +987,13 @@ async function bootstrap() {
     elTick.textContent = String(engine.currentTick);
     elSelected.textContent = String(counts.selectedCount);
     elHarvesters.textContent = String(counts.harvesterCount);
-    elEnemies.textContent = String(counts.nodCount);
-    elWave.textContent = `Next Wave: ${Math.ceil(engine.aiWaveCountdownTicks / GAME_CONFIG.TICK_RATE)}s`;
+    const waveRemainingSecs = Math.ceil(engine.aiWaveCountdownTicks / GAME_CONFIG.TICK_RATE);
+    const waveMins = Math.floor(waveRemainingSecs / 60);
+    const waveSecs = waveRemainingSecs % 60;
+    elWave.textContent =
+      waveMins > 0
+        ? `Next Wave: ${waveMins}m ${waveSecs.toString().padStart(2, '0')}s`
+        : `Next Wave: ${waveSecs}s`;
     elCmd.textContent = engine.lastCommandText;
     syncSidebarUI();
   });

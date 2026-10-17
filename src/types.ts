@@ -447,7 +447,7 @@ export const GAME_CONFIG = {
   MAP_COLS: 40,
   MAP_ROWS: 40,
   BASE_ADJACENCY_TILES: 7,
-  AI_WAVE_INTERVAL_TICKS: 900, // 45 seconds per Nod assault wave
+  AI_WAVE_INTERVAL_TICKS: 2400, // 2 minutes (120 seconds) per Nod assault wave
 };
 
 type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;
