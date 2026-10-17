@@ -97,26 +97,27 @@ export class GameEngine {
 
   private seedInitialMap(): void {
     // 1. Spawn Player (GDI - Owner 1) Strike Force on the West
-    this.spawnUnit('MCV', 336, 480, 1);
-    this.spawnUnit('HARVESTER', 430, 540, 1);
+    // 1. Spawn Player (GDI - Owner 1) Strike Force in Top-Left Corner
+    this.spawnUnit('MCV', 216, 216, 1);
+    this.spawnUnit('HARVESTER', 300, 240, 1);
 
-    this.spawnUnit('MEDIUM_TANK', 510, 390, 1);
-    this.spawnUnit('MEDIUM_TANK', 510, 450, 1);
-    this.spawnUnit('MEDIUM_TANK', 510, 510, 1);
+    this.spawnUnit('MEDIUM_TANK', 320, 160, 1);
+    this.spawnUnit('MEDIUM_TANK', 380, 220, 1);
+    this.spawnUnit('MEDIUM_TANK', 300, 320, 1);
 
-    this.spawnUnit('ROCKET_SOLDIER', 575, 410, 1);
-    this.spawnUnit('ROCKET_SOLDIER', 575, 470, 1);
+    this.spawnUnit('ROCKET_SOLDIER', 380, 290, 1);
+    this.spawnUnit('ROCKET_SOLDIER', 320, 380, 1);
 
-    this.spawnUnit('LIGHT_INFANTRY', 625, 395, 1);
-    this.spawnUnit('LIGHT_INFANTRY', 625, 435, 1);
-    this.spawnUnit('LIGHT_INFANTRY', 625, 475, 1);
-    this.spawnUnit('LIGHT_INFANTRY', 625, 515, 1);
+    this.spawnUnit('LIGHT_INFANTRY', 420, 170, 1);
+    this.spawnUnit('LIGHT_INFANTRY', 440, 220, 1);
+    this.spawnUnit('LIGHT_INFANTRY', 410, 310, 1);
+    this.spawnUnit('LIGHT_INFANTRY', 360, 390, 1);
 
-    // 2. Seed Tiberium Crystal Fields (Western/Central + Eastern Nod Field)
+    // 2. Seed Tiberium Crystal Fields (Top-Left GDI + Center Contested + Bottom-Right Nod)
     const patchCenters = [
-      { cx: 15, cy: 10 },
-      { cx: 18, cy: 16 },
-      { cx: 33, cy: 18 }, // Nod eastern Tiberium field
+      { cx: 8, cy: 9 },   // GDI top-left Tiberium field
+      { cx: 20, cy: 20 }, // Central contested Tiberium field
+      { cx: 31, cy: 24 }, // Nod bottom-right Tiberium field
     ];
     for (const center of patchCenters) {
       for (let dx = -2; dx <= 2; dx++) {
@@ -132,27 +133,27 @@ export class GameEngine {
       }
     }
 
-    // 3. Seed Hostile Brotherhood of Nod Outpost (Owner 2) in the East
-    this.spawnBuilding('CONSTRUCTION_YARD', 29, 7, 2);
-    this.spawnBuilding('POWER_PLANT', 33, 7, 2);
-    this.spawnBuilding('BARRACKS', 29, 11, 2);
-    this.spawnBuilding('REFINERY', 32, 11, 2);
-    this.spawnBuilding('GUARD_TOWER', 26, 9, 2);
-    this.spawnBuilding('GUARD_TOWER', 26, 13, 2);
+    // 3. Seed Hostile Brotherhood of Nod Outpost (Owner 2) in Far Bottom-Right Corner
+    this.spawnBuilding('CONSTRUCTION_YARD', 34, 34, 2);
+    this.spawnBuilding('POWER_PLANT', 31, 35, 2);
+    this.spawnBuilding('BARRACKS', 35, 30, 2);
+    this.spawnBuilding('REFINERY', 30, 31, 2);
+    this.spawnBuilding('GUARD_TOWER', 32, 27, 2); // North defense
+    this.spawnBuilding('GUARD_TOWER', 26, 33, 2); // West defense
 
     // Nod Harvester for autonomous AI economy
-    this.spawnUnit('HARVESTER', 1560, 680, 2);
+    this.spawnUnit('HARVESTER', 1512, 1540, 2);
 
-    // Forward Nod Patrol Squad
-    this.spawnUnit('LIGHT_INFANTRY', 1080, 440, 2);
-    this.spawnUnit('LIGHT_INFANTRY', 1080, 480, 2);
-    this.spawnUnit('ROCKET_SOLDIER', 1120, 460, 2);
-    this.spawnUnit('MEDIUM_TANK', 1165, 460, 2);
+    // Forward Nod Patrol Squad (holding Northwest approach to Nod base)
+    this.spawnUnit('LIGHT_INFANTRY', 1150, 1180, 2);
+    this.spawnUnit('LIGHT_INFANTRY', 1190, 1220, 2);
+    this.spawnUnit('ROCKET_SOLDIER', 1130, 1230, 2);
+    this.spawnUnit('MEDIUM_TANK', 1100, 1160, 2);
 
-    // Nod Base Staging Garrison
-    this.spawnUnit('MEDIUM_TANK', 1320, 560, 2);
-    this.spawnUnit('ROCKET_SOLDIER', 1280, 520, 2);
-    this.spawnUnit('LIGHT_INFANTRY', 1280, 580, 2);
+    // Nod Base Staging Garrison (protecting Bottom-Right structures)
+    this.spawnUnit('MEDIUM_TANK', 1500, 1580, 2);
+    this.spawnUnit('ROCKET_SOLDIER', 1580, 1480, 2);
+    this.spawnUnit('LIGHT_INFANTRY', 1460, 1450, 2);
   }
 
   public spawnUnit(type: UnitType, x: number, y: number, ownerId = 1): UnitEntity {
@@ -435,16 +436,16 @@ export class GameEngine {
 
       // Construct a Nod War Factory if ConYard exists and AI has funds
       if (hasConYard && !hasWarFactory && this.nodCredits >= 1800) {
-        if (this.isTileClearForBuilding(29, 14) && this.isTileClearForBuilding(30, 14)) {
+        if (this.isTileClearForBuilding(26, 29) && this.isTileClearForBuilding(27, 29) && this.isTileClearForBuilding(28, 29)) {
           this.nodCredits -= 1800;
-          this.spawnBuilding('WAR_FACTORY', 29, 14, 2);
+          this.spawnBuilding('WAR_FACTORY', 26, 29, 2);
         }
       }
 
       // Train Nod combat units and rally them at the forward staging area
       const { TILE_SIZE } = GAME_CONFIG;
-      const rallyX = 24 * TILE_SIZE + ((this.currentTick % 5) - 2) * 25;
-      const rallyY = 12 * TILE_SIZE + ((this.currentTick % 3) - 1) * 30;
+      const rallyX = 25 * TILE_SIZE + ((this.currentTick % 5) - 2) * 25;
+      const rallyY = 27 * TILE_SIZE + ((this.currentTick % 3) - 1) * 30;
 
       if (hasWarFactory && this.nodCredits >= 800) {
         this.nodCredits -= 800;
@@ -490,8 +491,8 @@ export class GameEngine {
     if (nodCombatUnits.length < 2) return;
 
     // Find primary GDI target coordinate (prefer GDI Construction Yard or any GDI building, else GDI unit)
-    let targetX = 420;
-    let targetY = 480;
+    let targetX = 216;
+    let targetY = 216;
 
     const gdiBuildings = Array.from(this.buildings.values()).filter((b) => b.ownerId === 1);
     const gdiUnits = Array.from(this.units.values()).filter((u) => u.ownerId === 1);
@@ -745,8 +746,8 @@ export class GameEngine {
     );
 
     const { TILE_SIZE } = GAME_CONFIG;
-    let spawnX = 400;
-    let spawnY = 400;
+    let spawnX = 240;
+    let spawnY = 240;
 
     if (producer) {
       spawnX = (producer.gridX + producer.widthTiles / 2) * TILE_SIZE;

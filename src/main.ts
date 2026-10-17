@@ -91,8 +91,8 @@ async function bootstrap() {
 
   // Camera & Interaction State
   const camera = {
-    x: -110,
-    y: -120,
+    x: 40,
+    y: 40,
     zoom: 1,
     panSpeed: 10,
     isMiddleDragging: false,
@@ -332,8 +332,8 @@ async function bootstrap() {
   btnRestart.addEventListener('click', () => {
     vfx.clearDecals();
     engine.resetMatch();
-    camera.x = -110;
-    camera.y = -120;
+    camera.x = 40;
+    camera.y = 40;
     matchOverlay.style.display = 'none';
   });
 
